@@ -16,13 +16,14 @@ android {
     }
 
     // Clé de signature fixe : permet d'installer les nouvelles versions par-dessus l'ancienne
-    // sans perdre l'historique enregistré sur le téléphone.
+    // sans perdre l'historique enregistré sur le téléphone. La clé n'est jamais dans le dépôt :
+    // GitHub la fournit au moment de la compilation (secret PLAUD_KEYSTORE_B64, voir apk.yml).
     signingConfigs {
         plaud {
             storeFile file('plaud.p12')
-            storePassword 'plaud-laurent'
+            storePassword System.getenv('PLAUD_KEY_PASSWORD')
             keyAlias 'plaud'
-            keyPassword 'plaud-laurent'
+            keyPassword System.getenv('PLAUD_KEY_PASSWORD')
         }
     }
 
