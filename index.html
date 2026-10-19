@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1F3A5F">
+<title>PLAUD Laurent</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+/* ============ COULEURS (modifiables) ============ */
+:root{
+  --navy:#1F3A5F; --teal:#2A7F8E; --red:#C0392B; --amber:#E0A526;
+  --bg:#F4F6F8; --card:#FFFFFF; --text:#1C2430; --muted:#6B7685; --line:#DDE3EA;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;font-size:16px}
+header{background:var(--navy);color:#fff;padding:calc(10px + env(safe-area-inset-top)) 16px 10px;
+  display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:5}
+header h1{font-size:18px;margin:0;letter-spacing:.5px}
+header small{opacity:.7;font-size:12px}
+nav{display:flex;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:48px;z-index:4}
+nav button{flex:1;border:0;background:none;padding:12px 4px;font-size:15px;color:var(--muted);border-bottom:3px solid transparent}
+nav button.on{color:var(--navy);font-weight:600;border-bottom-color:var(--teal)}
+main{max-width:720px;margin:0 auto;padding:14px 16px 120px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+.card h2{font-size:15px;margin:0 0 10px;color:var(--navy)}
+label{display:block;font-size:13px;color:var(--muted);margin:8px 0 4px}
+input,select,textarea{width:100%;font-size:16px;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--text);font-family:inherit}
+textarea{resize:vertical}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.hidden{display:none!important}
+
+/* Bloc enregistrement */
+.rec{text-align:center}
+.chrono{font-size:40px;font-variant-numeric:tabular-nums;font-weight:300;margin:4px 0}
+.status{font-size:14px;color:var(--muted);min-height:20px}
+.status.live{color:var(--red);font-weight:600}
+.status.warn{color:#9A6B00}
+.btns{display:flex;gap:12px;justify-content:center;margin-top:12px}
+.big{width:84px;height:84px;border-radius:50%;border:0;color:#fff;font-size:14px;font-weight:600;box-shadow:0 2px 6px rgba(0,0,0,.15)}
+.big.start{background:var(--red)} .big.pause{background:var(--amber)} .big.stop{background:var(--navy)}
+.big:disabled{opacity:.35}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--red);margin-right:6px;animation:blink 1s infinite}
+@keyframes blink{50%{opacity:.2}}
+.interim{color:var(--muted);font-style:italic;min-height:22px;margin-top:6px;font-size:15px}
+.meta{font-size:12px;color:var(--muted);margin-top:6px;display:flex;justify-content:space-between}
+
+/* Boutons d'action */
+.btn{display:block;width:100%;padding:13px;border-radius:10px;border:1px solid var(--line);background:#fff;font-size:15px;color:var(--navy);font-weight:600;margin-top:8px}
+.btn.primary{background:var(--teal);border-color:var(--teal);color:#fff}
+.btn.danger{color:var(--red)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}.grid2 .btn{margin-top:0}
+
+/* Historique */
+.item{border-bottom:1px solid var(--line);padding:10px 0}
+.item:last-child{border-bottom:0}
+.item b{color:var(--navy)}
+.item .sub{font-size:13px;color:var(--muted);margin:2px 0 8px}
+.item .acts{display:flex;gap:8px}
+.item .acts button{flex:1;padding:8px;border-radius:8px;border:1px solid var(--line);background:#fff;font-size:13px;color:var(--navy)}
+.empty{color:var(--muted);text-align:center;padding:20px 0}
+
+.toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);
+  background:#1C2430;color:#fff;padding:10px 16px;border-radius:20px;font-size:14px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%;text-align:center}
+.toast.show{opacity:.95}
+.alert{background:#FFF4DC;border:1px solid var(--amber);border-radius:10px;padding:10px 12px;font-size:14px;margin-bottom:14px}
+.help{font-size:13px;color:var(--muted);line-height:1.45}
+.chk{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:15px}
+.chk input{width:22px;height:22px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>PLAUD Laurent</h1>
+  <small id="netState"></small>
+</header>
+<nav>
+  <button data-tab="tRec" class="on">Entretien</button>
+  <button data-tab="tHist">Historique</button>
+  <button data-tab="tSet">Réglages</button>
+</nav>
+
+<main>
+<!-- ======================= ONGLET ENTRETIEN ======================= -->
+<section id="tRec">
+  <div id="noSpeech" class="alert hidden">La transcription en direct n'est pas disponible dans ce navigateur. Utilisez Google Chrome sur Android. Vous pouvez quand même coller une transcription (Dictaphone Samsung, Enregistreur…) dans la zone Transcription.</div>
+
+  <div class="card">
+    <h2>Fiche de l'entretien</h2>
+    <div class="row">
+      <div><label for="fContact">Interlocuteur</label><input id="fContact" placeholder="Nom, fonction"></div>
+      <div><label for="fCompany">Société</label><input id="fCompany" placeholder="Société"></div>
+    </div>
+    <div class="row">
+      <div><label for="fType">Type</label>
+        <select id="fType">
+          <option>Rendez-vous client</option>
+          <option>Réunion fournisseur</option>
+          <option>Discussion stratégique</option>
+          <option>Réunion interne</option>
+          <option>Autre</option>
+        </select></div>
+      <div><label for="fDate">Date</label><input id="fDate" type="date"></div>
+    </div>
+  </div>
+
+  <div class="card rec">
+    <div class="chrono" id="chrono">00:00</div>
+    <div class="status" id="status">Prêt à enregistrer</div>
+    <div class="btns">
+      <button class="big start" id="bStart">Démarrer</button>
+      <button class="big pause" id="bPause" disabled>Pause</button>
+      <button class="big stop" id="bStop" disabled>Arrêter</button>
+    </div>
+    <div class="interim" id="interim"></div>
+  </div>
+
+  <div class="card">
+    <h2>Transcription</h2>
+    <textarea id="fText" rows="10" placeholder="Le texte apparaît ici pendant l'enregistrement. Vous pouvez le corriger ou y coller une transcription faite avec un autre outil."></textarea>
+    <div class="meta"><span id="wordCount">0 mot</span><span id="saveState"></span></div>
+  </div>
+
+  <div class="card">
+    <h2>Compte-rendu par Claude</h2>
+    <button class="btn primary" id="bShare">Envoyer à Claude</button>
+    <div class="grid2" style="margin-top:8px">
+      <button class="btn" id="bCopy">Copier pour Claude</button>
+      <button class="btn" id="bSave">Archiver</button>
+      <button class="btn" id="bDownload">Télécharger .txt</button>
+      <button class="btn danger" id="bNew">Nouvel entretien</button>
+    </div>
+    <p class="help">« Envoyer à Claude » ouvre le menu de partage du téléphone : choisissez l'application Claude. Si elle n'apparaît pas, utilisez « Copier pour Claude » puis collez le texte dans votre Projet PLAUD LAURENT.</p>
+  </div>
+</section>
+
+<!-- ======================= ONGLET HISTORIQUE ======================= -->
+<section id="tHist" class="hidden">
+  <div class="card">
+    <h2>Entretiens archivés</h2>
+    <input id="hSearch" placeholder="Rechercher (société, interlocuteur, mot)…">
+    <div id="hList" style="margin-top:8px"></div>
+  </div>
+  <div class="card">
+    <h2>Sauvegarde</h2>
+    <p class="help">L'historique est conservé uniquement sur ce téléphone. Exportez-le de temps en temps pour le garder en lieu sûr.</p>
+    <div class="grid2">
+      <button class="btn" id="bExport">Exporter tout</button>
+      <button class="btn" id="bImport">Importer</button>
+    </div>
+    <input type="file" id="fImport" accept=".json,application/json" class="hidden">
+  </div>
+</section>
+
+<!-- ======================= ONGLET RÉGLAGES ======================= -->
+<section id="tSet" class="hidden">
+  <div class="card">
+    <h2>Consigne envoyée à Claude</h2>
+    <textarea id="sPrompt" rows="14"></textarea>
+    <label class="chk"><input type="checkbox" id="sInclude"> Joindre la consigne au texte envoyé</label>
+    <p class="help">Laissez coché si vous collez le texte dans une conversation ordinaire. Décochez si vous travaillez toujours dans le Projet PLAUD LAURENT, qui contient déjà ces instructions.</p>
+    <button class="btn" id="bResetPrompt">Rétablir la consigne d'origine</button>
+  </div>
+  <div class="card">
+    <h2>Enregistrement</h2>
+    <label for="sLang">Langue parlée</label>
+    <select id="sLang">
+      <option value="fr-FR">Français (France)</option>
+      <option value="en-GB">Anglais</option>
+      <option value="de-DE">Allemand</option>
+      <option value="es-ES">Espagnol</option>
+      <option value="it-IT">Italien</option>
+    </select>
+    <label class="chk"><input type="checkbox" id="sWake"> Garder l'écran allumé pendant l'enregistrement</label>
+    <label class="chk"><input type="checkbox" id="sPara"> Nouveau paragraphe après un silence de plus de 4 s</label>
+  </div>
+  <div class="card">
+    <h2>À propos</h2>
+    <p class="help">PLAUD Laurent v1.0 — usage privé. Transcription : reconnaissance vocale intégrée au navigateur (gratuite, connexion internet nécessaire). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
+  </div>
+</section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* =====================================================================
+   PLAUD Laurent — application autonome (HTML + CSS + JavaScript)
+   Données stockées uniquement sur l'appareil (localStorage).
+   ===================================================================== */
+
+/* ---------- Consigne par défaut (reprend les instructions du Projet) ---------- */
+const DEFAULT_PROMPT =
+`RÔLE : Tu es l'assistant exécutif et commercial personnel de Laurent. Transforme la transcription brute ci-dessous en un compte-rendu professionnel, structuré, précis et immédiatement exploitable.
+
+CONTEXTE MÉTIER : vente et conseil en équipements de manutention (chariots élévateurs, rayonnages, nacelles, filmeuses, solutions logistiques) ; développement de projets d'entreprise, structuration de holding et partenariats stratégiques.
+
+La transcription provient d'une reconnaissance vocale automatique : elle n'a pas de ponctuation et contient des erreurs phonétiques. Corrige-les d'après le contexte, en particulier les noms de marques (Hyster, Yale, Haulotte, Robopac, AR Racking, Manorga, Stockman, Fimap, Enersys…). Signale entre crochets ce qui reste incertain.
+
+STRUCTURE DU COMPTE-RENDU :
+1. SYNTHÈSE EXÉCUTIVE — 3 ou 4 phrases maximum (objectif principal, ton général, conclusion majeure).
+2. INFORMATIONS CLÉS & BESOINS EXPRIMÉS — faits marquants, problématiques soulevées, attentes précises.
+3. SOLUTIONS / PISTES ÉVOQUÉES — équipements, services ou montages stratégiques abordés.
+4. PLAN D'ACTION ET PROCHAINES ÉTAPES — actions classées par priorité, avec le responsable (Laurent / le client / un tiers) si mentionné.
+5. POINTS DE VIGILANCE / RISQUES — objections, contraintes budgétaires, techniques ou juridiques.
+
+TON ET FORMAT : professionnel, percutant, orienté business et action ; vocabulaire technique précis ; titres clairs et listes à puces.`;
+
+/* ---------- Stockage local sécurisé ---------- */
+const store = {
+  get(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } },
+  set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); return true; }catch(e){ toast("Mémoire du téléphone pleine : exportez puis supprimez d'anciens entretiens."); return false; } }
+};
+const K_DRAFT='plaud.draft', K_HIST='plaud.history', K_SET='plaud.settings';
+
+let settings = Object.assign({prompt: DEFAULT_PROMPT, include: true, lang: 'fr-FR', wake: true, para: true}, store.get(K_SET, {}));
+
+/* ---------- Raccourcis ---------- */
+const $ = id => document.getElementById(id);
+const els = {
+  contact:$('fContact'), company:$('fCompany'), type:$('fType'), date:$('fDate'), text:$('fText'),
+  chrono:$('chrono'), status:$('status'), interim:$('interim'),
+  bStart:$('bStart'), bPause:$('bPause'), bStop:$('bStop')
+};
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2600); }
+function today(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function fmtTime(s){ s=Math.floor(s); const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60;
+  return (h? h+':'+String(m).padStart(2,'0') : String(m).padStart(2,'0'))+':'+String(x).padStart(2,'0'); }
+function frDate(iso){ if(!iso) return ''; const [y,m,d]=iso.split('-'); return d+'/'+m+'/'+y; }
+function words(t){ const n=(t.trim().match(/\S+/g)||[]).length; return n+(n>1?' mots':' mot'); }
+
+/* ---------- Onglets ---------- */
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on', x===b));
+  ['tRec','tHist','tSet'].forEach(id=>$(id).classList.toggle('hidden', id!==b.dataset.tab));
+  if(b.dataset.tab==='tHist') renderHistory();
+});
+
+/* ---------- Brouillon en cours (sauvegarde automatique) ---------- */
+let elapsed = 0;           // secondes enregistrées
+let currentId = null;      // identifiant si l'entretien est déjà archivé
+function saveDraft(){
+  store.set(K_DRAFT, {contact:els.contact.value, company:els.company.value, type:els.type.value,
+    date:els.date.value, text:els.text.value, elapsed, currentId});
+  $('wordCount').textContent = words(els.text.value);
+  $('saveState').textContent = 'Brouillon enregistré';
+}
+function loadDraft(d){
+  d = d || {};
+  els.contact.value=d.contact||''; els.company.value=d.company||''; els.type.value=d.type||'Rendez-vous client';
+  els.date.value=d.date||today(); els.text.value=d.text||''; elapsed=d.elapsed||0; currentId=d.currentId||null;
+  els.chrono.textContent=fmtTime(elapsed); $('wordCount').textContent=words(els.text.value);
+}
+['contact','company','type','date','text'].forEach(k=>els[k].addEventListener('input', saveDraft));
+
+/* =====================================================================
+   RECONNAISSANCE VOCALE (Web Speech API, gratuite, intégrée à Chrome)
+   Sur Android, le mode continu duplique le texte : on enchaîne donc des
+   sessions courtes redémarrées automatiquement.
+   ===================================================================== */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+let rec = null, state = 'idle';   // idle | live | paused
+let tickStart = 0, timer = null, lastFinalAt = 0, lastFinalTxt = '', errStreak = 0, wakeLock = null;
+
+if(!SR){ $('noSpeech').classList.remove('hidden'); els.bStart.disabled = true; }
+
+function setStatus(txt, cls){ els.status.className='status '+(cls||''); els.status.innerHTML=txt; }
+
+function appendFinal(txt){
+  txt = (txt||'').trim(); if(!txt) return;
+  const now = Date.now();
+  const key = txt.toLowerCase();
+  if(key === lastFinalTxt && now - lastFinalAt < 2000) return;       // doublon Android
+  let cur = els.text.value;
+  let sep = '';
+  if(cur.length){
+    sep = (settings.para && lastFinalAt && now - lastFinalAt > 4000) ? '\n\n' : ' ';
+    if(sep===' ' && /\s$/.test(cur)) sep = '';
+  }
+  txt = txt.charAt(0).toUpperCase() + txt.slice(1);
+  els.text.value = cur + sep + txt;
+  els.text.scrollTop = els.text.scrollHeight;
+  lastFinalAt = now; lastFinalTxt = key;
+  saveDraft();
+}
+
+function buildRecognizer(){
+  const r = new SR();
+  r.lang = settings.lang;
+  r.interimResults = true;
+  r.continuous = !IS_ANDROID;
+  r.maxAlternatives = 1;
+  r.onresult = e => {
+    errStreak = 0;
+    let interim = '';
+    if(IS_ANDROID){
+      const res = e.results[e.results.length-1];
+      if(res.isFinal) appendFinal(res[0].transcript); else interim = res[0].transcript;
+    } else {
+      for(let i=e.resultIndex; i<e.results.length; i++){
+        const res = e.results[i];
+        if(res.isFinal) appendFinal(res[0].transcript); else interim += res[0].transcript;
+      }
+    }
+    els.interim.textContent = interim;
+  };
+  r.onerror = e => {
+    if(e.error==='not-allowed' || e.error==='service-not-allowed'){
+      stopRecording(); setStatus('Micro refusé : autorisez le micro pour cette application dans les réglages du téléphone.','warn');
+    } else if(e.error==='network'){
+      errStreak++; setStatus('Pas de connexion internet : la transcription reprendra dès le retour du réseau.','warn');
+    } else if(e.error==='audio-capture'){
+      errStreak++; setStatus('Micro indisponible (utilisé par une autre application ?)','warn');
+    }
+    /* no-speech / aborted : normal, la session redémarre */
+  };
+  r.onend = () => {
+    els.interim.textContent = '';
+    if(state === 'live'){
+      const delay = errStreak ? Math.min(5000, 600*errStreak) : 120;
+      setTimeout(()=>{ if(state==='live'){ try{ r.start(); }catch(_){} } }, delay);
+    }
+  };
+  r.onstart = () => { if(state==='live' && !errStreak) setStatus('<span class="dot"></span>Enregistrement en cours','live'); };
+  return r;
+}
+
+async function keepAwake(on){
+  try{
+    if(on && settings.wake && 'wakeLock' in navigator){ wakeLock = await navigator.wakeLock.request('screen'); }
+    else if(!on && wakeLock){ await wakeLock.release(); wakeLock = null; }
+  }catch(_){}
+}
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && state==='live') keepAwake(true); });
+
+function startTimer(){ tickStart = Date.now(); const base = elapsed;
+  timer = setInterval(()=>{ elapsed = base + (Date.now()-tickStart)/1000; els.chrono.textContent = fmtTime(elapsed); }, 500); }
+function stopTimer(){ clearInterval(timer); timer=null; saveDraft(); }
+
+function startRecording(){
+  if(!SR) return;
+  if(state==='live') return;
+  rec = rec || buildRecognizer();
+  rec.lang = settings.lang;
+  state = 'live'; errStreak = 0;
+  try{ rec.start(); }catch(_){}
+  startTimer(); keepAwake(true);
+  setStatus('<span class="dot"></span>Enregistrement en cours','live');
+  els.bStart.disabled = true; els.bPause.disabled = false; els.bStop.disabled = false;
+  els.bPause.textContent = 'Pause';
+}
+function pauseRecording(){
+  if(state==='live'){
+    state='paused'; try{ rec.stop(); }catch(_){} stopTimer(); keepAwake(false);
+    setStatus('En pause','warn'); els.bPause.textContent='Reprendre';
+  } else if(state==='paused'){
+    els.bStart.disabled=false; startRecording();
+  }
+}
+function stopRecording(){
+  state='idle'; try{ rec && rec.stop(); }catch(_){} if(timer) stopTimer(); keepAwake(false);
+  els.interim.textContent='';
+  setStatus(els.text.value.trim() ? 'Enregistrement terminé — envoyez le texte à Claude' : 'Prêt à enregistrer');
+  els.bStart.disabled = !SR; els.bPause.disabled = true; els.bStop.disabled = true;
+  els.bStart.textContent = els.text.value.trim() ? 'Continuer' : 'Démarrer';
+  els.bPause.textContent = 'Pause';
+}
+els.bStart.onclick = startRecording;
+els.bPause.onclick = pauseRecording;
+els.bStop.onclick = stopRecording;
+
+/* =====================================================================
+   MESSAGE POUR CLAUDE
+   ===================================================================== */
+function buildMessage(entry){
+  const e = entry || currentEntry();
+  const head =
+`INFORMATIONS SUR L'ENTRETIEN
+- Date : ${frDate(e.date)}
+- Interlocuteur : ${e.contact || 'non précisé'}
+- Société : ${e.company || 'non précisée'}
+- Type : ${e.type}
+- Durée d'enregistrement : ${fmtTime(e.elapsed||0)}
+
+TRANSCRIPTION BRUTE :
+"""
+${e.text.trim()}
+"""`;
+  return settings.include ? settings.prompt.trim() + '\n\n' + head : 'Rédige le compte-rendu de cet entretien.\n\n' + head;
+}
+function currentEntry(){
+  return {contact:els.contact.value.trim(), company:els.company.value.trim(), type:els.type.value,
+          date:els.date.value||today(), text:els.text.value, elapsed};
+}
+function hasText(){ if(!els.text.value.trim()){ toast('La transcription est vide.'); return false; } return true; }
+
+async function copyText(t){
+  try{ await navigator.clipboard.writeText(t); return true; }
+  catch(_){ // repli pour navigateurs anciens
+    const ta=document.createElement('textarea'); ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select(); let ok=false; try{ ok=document.execCommand('copy'); }catch(__){} ta.remove(); return ok; }
+}
+async function shareText(t, title){
+  if(navigator.share){
+    try{ await navigator.share({title, text:t}); return; }
+    catch(e){ if(e && e.name==='AbortError') return; }
+  }
+  if(await copyText(t)) toast('Texte copié : collez-le dans Claude.'); else toast('Copie impossible sur cet appareil.');
+}
+function downloadText(t, name){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([t],{type:'text/plain;charset=utf-8'}));
+  a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+}
+function fileName(e){ const s=(e.company||e.contact||'entretien').replace(/[^\w\-À-ÿ]+/g,'_').slice(0,40); return 'CR_'+(e.date||today())+'_'+s+'.txt'; }
+
+$('bShare').onclick = ()=>{ if(!hasText()) return; autoArchive(); shareText(buildMessage(), 'Entretien '+(els.company.value||'')); };
+$('bCopy').onclick  = async ()=>{ if(!hasText()) return; autoArchive(); toast(await copyText(buildMessage()) ? 'Copié : collez dans Claude' : 'Copie impossible'); };
+$('bDownload').onclick = ()=>{ if(!hasText()) return; downloadText(buildMessage(), fileName(currentEntry())); };
+$('bSave').onclick = ()=>{ if(!hasText()) return; autoArchive(); toast('Entretien archivé'); };
+$('bNew').onclick = ()=>{
+  if(state!=='idle') stopRecording();
+  if(els.text.value.trim() && !confirmNew()) return;
+  if(els.text.value.trim()) autoArchive();
+  loadDraft({}); saveDraft(); lastFinalAt=0; lastFinalTxt='';
+  els.bStart.textContent='Démarrer'; setStatus('Prêt à enregistrer'); toast('Nouvel entretien');
+};
+let newArmed = 0;
+function confirmNew(){ // double appui pour confirmer (évite les boîtes de dialogue)
+  if(Date.now()-newArmed < 3000){ newArmed=0; return true; }
+  newArmed=Date.now(); toast('Appuyez encore pour démarrer un nouvel entretien (l’actuel sera archivé)'); return false;
+}
+
+/* =====================================================================
+   HISTORIQUE
+   ===================================================================== */
+function autoArchive(){
+  const hist = store.get(K_HIST, []);
+  const e = currentEntry(); e.updated = Date.now();
+  if(currentId){ const i = hist.findIndex(h=>h.id===currentId); if(i>=0){ e.id=currentId; hist[i]=e; } else { e.id=currentId; hist.unshift(e); } }
+  else { e.id = 'e'+Date.now(); currentId = e.id; hist.unshift(e); }
+  store.set(K_HIST, hist); saveDraft();
+}
+function renderHistory(){
+  const q = $('hSearch').value.trim().toLowerCase();
+  const hist = store.get(K_HIST, []).filter(h=>!q || [h.company,h.contact,h.type,h.text].join(' ').toLowerCase().includes(q));
+  const box = $('hList'); box.innerHTML='';
+  if(!hist.length){ box.innerHTML='<div class="empty">Aucun entretien archivé</div>'; return; }
+  hist.forEach(h=>{
+    const d=document.createElement('div'); d.className='item';
+    const title=document.createElement('b'); title.textContent=(h.company||'Sans société')+(h.contact?' — '+h.contact:'');
+    const sub=document.createElement('div'); sub.className='sub';
+    sub.textContent=frDate(h.date)+' · '+h.type+' · '+fmtTime(h.elapsed||0)+' · '+words(h.text||'');
+    const acts=document.createElement('div'); acts.className='acts';
+    [['Ouvrir',()=>openEntry(h)],['Envoyer',()=>shareText(buildMessage(h),'Entretien '+(h.company||''))],['Supprimer',(btn)=>delEntry(h.id,btn)]]
+      .forEach(([lbl,fn])=>{ const b=document.createElement('button'); b.textContent=lbl; b.onclick=()=>fn(b); acts.appendChild(b); });
+    d.append(title,sub,acts); box.appendChild(d);
+  });
+}
+$('hSearch').addEventListener('input', renderHistory);
+function openEntry(h){
+  if(state!=='idle') stopRecording();
+  loadDraft(Object.assign({}, h, {currentId:h.id})); saveDraft();
+  els.bStart.textContent='Continuer'; setStatus('Entretien rouvert');
+  document.querySelector('nav button[data-tab="tRec"]').click();
+}
+function delEntry(id, btn){
+  if(!btn.dataset.armed){ btn.dataset.armed='1'; btn.textContent='Confirmer ?'; setTimeout(()=>{ if(btn.isConnected){ btn.dataset.armed=''; btn.textContent='Supprimer'; } },3000); return; }
+  store.set(K_HIST, store.get(K_HIST, []).filter(h=>h.id!==id));
+  if(currentId===id){ currentId=null; saveDraft(); }
+  renderHistory(); toast('Entretien supprimé');
+}
+$('bExport').onclick = ()=>{
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([JSON.stringify(store.get(K_HIST,[]),null,1)],{type:'application/json'}));
+  a.download='PLAUD_historique_'+today()+'.json'; document.body.appendChild(a); a.click(); a.remove();
+};
+$('bImport').onclick = ()=>$('fImport').click();
+$('fImport').onchange = ev=>{
+  const f=ev.target.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{ try{
+      const add=JSON.parse(rd.result); if(!Array.isArray(add)) throw 0;
+      const hist=store.get(K_HIST,[]); const ids=new Set(hist.map(h=>h.id));
+      let n=0; add.forEach(h=>{ if(h && h.id && typeof h.text==='string' && !ids.has(h.id)){ hist.push(h); n++; } });
+      hist.sort((a,b)=>(b.updated||0)-(a.updated||0)); store.set(K_HIST,hist); renderHistory(); toast(n+' entretien(s) importé(s)');
+    }catch(_){ toast('Fichier non reconnu'); } };
+  rd.readAsText(f); ev.target.value='';
+};
+
+/* =====================================================================
+   RÉGLAGES
+   ===================================================================== */
+function saveSettings(){ store.set(K_SET, settings); }
+$('sPrompt').value = settings.prompt; $('sInclude').checked = settings.include;
+$('sLang').value = settings.lang; $('sWake').checked = settings.wake; $('sPara').checked = settings.para;
+$('sPrompt').addEventListener('input', e=>{ settings.prompt=e.target.value; saveSettings(); });
+$('sInclude').onchange = e=>{ settings.include=e.target.checked; saveSettings(); };
+$('sLang').onchange = e=>{ settings.lang=e.target.value; saveSettings(); };
+$('sWake').onchange = e=>{ settings.wake=e.target.checked; saveSettings(); };
+$('sPara').onchange = e=>{ settings.para=e.target.checked; saveSettings(); };
+$('bResetPrompt').onclick = ()=>{ settings.prompt=DEFAULT_PROMPT; $('sPrompt').value=DEFAULT_PROMPT; saveSettings(); toast("Consigne d'origine rétablie"); };
+
+/* ---------- État réseau ---------- */
+function net(){ $('netState').textContent = navigator.onLine ? '' : 'Hors ligne'; }
+addEventListener('online', net); addEventListener('offline', net); net();
+
+/* ---------- Démarrage ---------- */
+loadDraft(store.get(K_DRAFT, null));
+if(els.text.value.trim()){ els.bStart.textContent='Continuer'; setStatus('Brouillon restauré'); }
+
+/* ---------- Mode hors ligne / installation (seulement si publié en https) ---------- */
+if('serviceWorker' in navigator && location.protocol.startsWith('http')){
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
+</script>
+</body>
+</html>
