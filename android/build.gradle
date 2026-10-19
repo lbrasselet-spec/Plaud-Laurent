@@ -1,0 +1,45 @@
+// PLAUD Laurent — module de l'application (copié en app/build.gradle par .github/workflows/apk.yml)
+plugins {
+    id 'com.android.application' version '8.5.2'
+}
+
+android {
+    namespace 'fr.brasselet.plaud'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'fr.brasselet.plaud'
+        minSdk 26
+        targetSdk 34
+        versionCode Integer.parseInt(System.getenv('VERSION_CODE') ?: '1')
+        versionName '1.3.' + (System.getenv('VERSION_CODE') ?: '0')
+    }
+
+    // Clé de signature fixe : permet d'installer les nouvelles versions par-dessus l'ancienne
+    // sans perdre l'historique enregistré sur le téléphone.
+    signingConfigs {
+        plaud {
+            storeFile file('plaud.p12')
+            storePassword 'plaud-laurent'
+            keyAlias 'plaud'
+            keyPassword 'plaud-laurent'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.plaud
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}

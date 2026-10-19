@@ -1,0 +1,17 @@
+// PLAUD Laurent — application Android (projet assemblé par .github/workflows/apk.yml)
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = 'PLAUD-Laurent'
+include ':app'
