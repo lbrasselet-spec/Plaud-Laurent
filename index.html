@@ -119,7 +119,7 @@ textarea{resize:vertical}
     </div>
     <div class="interim" id="interim"></div>
     <button class="btn" id="bBlack" disabled>Écran noir (discret, micro actif)</button>
-    <p class="help" style="text-align:left;margin-bottom:0">Le bip est émis par Android, pas par l'application : avant l'entretien, baissez le volume <b>Multimédia</b> à zéro et passez le téléphone en mode <b>Silencieux</b>. Pour poser le téléphone, utilisez « Écran noir » : un appui sur le bouton de veille coupe la transcription.</p>
+    <p class="help" id="recHelp" style="text-align:left;margin-bottom:0">Le bip est émis par Android, pas par l'application : avant l'entretien, baissez le volume <b>Multimédia</b> à zéro et passez le téléphone en mode <b>Silencieux</b>. Pour poser le téléphone, utilisez « Écran noir » : un appui sur le bouton de veille coupe la transcription.</p>
   </div>
 
   <div class="card">
@@ -185,7 +185,7 @@ textarea{resize:vertical}
   </div>
   <div class="card">
     <h2>À propos</h2>
-    <p class="help">PLAUD Laurent v1.2 — usage privé. Transcription : reconnaissance vocale intégrée au navigateur (gratuite, connexion internet nécessaire). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
+    <p class="help">PLAUD Laurent v1.3 — usage privé. Transcription : reconnaissance vocale intégrée au navigateur (gratuite, connexion internet nécessaire). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
   </div>
 </section>
 </main>
@@ -222,6 +222,7 @@ const store = {
   set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); return true; }catch(e){ toast("Mémoire du téléphone pleine : exportez puis supprimez d'anciens entretiens."); return false; } }
 };
 const K_DRAFT='plaud.draft', K_HIST='plaud.history', K_SET='plaud.settings';
+const NATIVE = window.PlaudNative || null;   // v1.3 — présent seulement dans l'application Android (APK)
 
 let settings = Object.assign({prompt: DEFAULT_PROMPT, include: true, lang: 'fr-FR', wake: true, para: true, cont: false}, store.get(K_SET, {}));
 
@@ -249,9 +250,10 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
 /* ---------- Brouillon en cours (sauvegarde automatique) ---------- */
 let elapsed = 0;           // secondes enregistrées
 let currentId = null;      // identifiant si l'entretien est déjà archivé
+let nSess = '', nIdx = 0;  // v1.3 — application Android : session du service et phrases déjà reçues
 function saveDraft(){
   store.set(K_DRAFT, {contact:els.contact.value, company:els.company.value, type:els.type.value,
-    date:els.date.value, text:els.text.value, elapsed, currentId});
+    date:els.date.value, text:els.text.value, elapsed, currentId, nSess, nIdx});
   $('wordCount').textContent = words(els.text.value);
   $('saveState').textContent = 'Brouillon enregistré';
 }
@@ -259,6 +261,7 @@ function loadDraft(d){
   d = d || {};
   els.contact.value=d.contact||''; els.company.value=d.company||''; els.type.value=d.type||'Rendez-vous client';
   els.date.value=d.date||today(); els.text.value=d.text||''; elapsed=d.elapsed||0; currentId=d.currentId||null;
+  nSess=d.nSess||''; nIdx=d.nIdx||0;
   els.chrono.textContent=fmtTime(elapsed); $('wordCount').textContent=words(els.text.value);
 }
 ['contact','company','type','date','text'].forEach(k=>els[k].addEventListener('input', saveDraft));
@@ -270,7 +273,38 @@ function loadDraft(d){
    v1.2 — Chaque redémarrage déclenche le bip d'Android. Chrome 157+ corrige
    le mode continu sur Android (écoute jusqu'à 5 min) : option « Mode continu ».
    ===================================================================== */
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+/* v1.3 — APPLICATION ANDROID (APK) : la reconnaissance tourne dans un service du
+   téléphone (écran verrouillé, bip coupé). NativeSR imite l'objet du navigateur pour
+   que le reste du code reste inchangé. Les phrases reconnues écran éteint sont gardées
+   par le service ; la page les récupère dès qu'elle est de nouveau affichée. */
+function NativeSR(){ this.lang='fr-FR'; this.continuous=true; this.interimResults=true; this.maxAlternatives=1; this._timer=null; this._live=false; this._interim=''; this._err=''; }
+NativeSR.prototype._ev = function(t, fin){ const r=[{transcript:t}]; r.isFinal=fin; return {resultIndex:0, results:[r]}; };
+NativeSR.prototype.start = function(){
+  let r; try{ r = JSON.parse(NATIVE.start(this.lang)); }catch(_){ r = {ok:false, error:'service'}; }
+  if(!r.ok){ setTimeout(()=>{ if(this.onerror) this.onerror({error:r.error||'service'}); }, 0); return; }   // différé, comme dans le navigateur
+  if(r.session !== nSess){ nSess = r.session; nIdx = 0; saveDraft(); }
+  this._live = true; this._err = ''; this._interim = '';
+  clearInterval(this._timer); this._timer = setInterval(()=>this._poll(), 700);
+  setTimeout(()=>{ if(this._live && this.onstart) this.onstart(); }, 0);
+};
+NativeSR.prototype._poll = function(){
+  let p; try{ p = JSON.parse(NATIVE.poll(nSess, nIdx)); }catch(_){ return; }
+  let got = false;
+  if(p.session === nSess) (p.segs||[]).forEach(t=>{ nIdx++; got = true; if(this.onresult) this.onresult(this._ev(t, true)); });
+  const it = p.interim || '';
+  if(got || it !== this._interim){ this._interim = it; if(this.onresult) this.onresult(this._ev(it, false)); }
+  const er = p.err || '';
+  if(er !== this._err){ this._err = er; if(er){ if(this.onerror) this.onerror({error:er}); } else { errStreak = 0; if(this.onstart) this.onstart(); } }
+  if(this._live && !p.running){ this._live = false; clearInterval(this._timer); if(this.onerror) this.onerror({error:p.fail || 'service'}); }
+};
+NativeSR.prototype.stop = function(){
+  const was = this._live; this._live = false; clearInterval(this._timer);
+  try{ NATIVE.stop(); }catch(_){}
+  if(was){ setTimeout(()=>this._poll(), 1000); setTimeout(()=>this._poll(), 2800); }
+  if(this.onend) this.onend();
+};
+NativeSR.prototype.abort = NativeSR.prototype.stop;
+const SR = NATIVE ? NativeSR : (window.SpeechRecognition || window.webkitSpeechRecognition);
 const IS_ANDROID = /Android/i.test(navigator.userAgent);
 let rec = null, state = 'idle';   // idle | live | paused
 let tickStart = 0, timer = null, lastFinalAt = 0, lastFinalTxt = '', errStreak = 0, wakeLock = null;
@@ -283,7 +317,7 @@ function appendFinal(txt){
   txt = (txt||'').trim(); if(!txt) return;
   const now = Date.now();
   const key = txt.toLowerCase();
-  if(key === lastFinalTxt && now - lastFinalAt < 2000) return;       // doublon Android
+  if(!NATIVE && key === lastFinalTxt && now - lastFinalAt < 2000) return;       // doublon Android (navigateur)
   let cur = els.text.value;
   let sep = '';
   if(cur.length){
@@ -324,6 +358,8 @@ function buildRecognizer(){
       errStreak++; setStatus('Pas de connexion internet : la transcription reprendra dès le retour du réseau.','warn');
     } else if(e.error==='audio-capture'){
       errStreak++; setStatus('Micro indisponible (utilisé par une autre application ?)','warn');
+    } else if(e.error==='service'){   // v1.3 — application Android
+      stopRecording(); setStatus("L'enregistrement s'est interrompu : appuyez sur Continuer pour reprendre.",'warn');
     }
     /* no-speech / aborted : normal, la session redémarre */
   };
@@ -340,6 +376,7 @@ function buildRecognizer(){
 
 const WAKE_MSG = "Le téléphone refuse de garder l'écran allumé : désactivez l'économie d'énergie ou allongez le délai de mise en veille de l'écran.";
 async function keepAwake(on){
+  if(NATIVE) return;   // v1.3 — inutile dans l'application Android : l'écran peut s'éteindre
   try{
     if(on && settings.wake){
       if(!('wakeLock' in navigator)) { toast(WAKE_MSG); return; }
@@ -352,6 +389,7 @@ async function keepAwake(on){
 /* v1.1 — Mise en veille : Android coupe le micro quand l'écran s'éteint.
    On marque l'interruption dans le texte et on reprend automatiquement au réveil. */
 document.addEventListener('visibilitychange', ()=>{
+  if(NATIVE){ if(document.visibilityState==='visible' && rec && rec._live) rec._poll(); return; }   // v1.3 — l'application continue écran éteint
   if(document.visibilityState==='hidden' && state==='live'){
     state='suspended'; try{ rec.stop(); }catch(_){} stopTimer(); hideBlack();
     if(els.text.value.trim()){ els.text.value += '\n\n[Interruption : téléphone en veille]\n\n'; lastFinalAt = 0; saveDraft(); }
@@ -431,12 +469,14 @@ function currentEntry(){
 function hasText(){ if(!els.text.value.trim()){ toast('La transcription est vide.'); return false; } return true; }
 
 async function copyText(t){
+  if(NATIVE){ NATIVE.copy(t); return true; }   // v1.3 — application Android
   try{ await navigator.clipboard.writeText(t); return true; }
   catch(_){ // repli pour navigateurs anciens
     const ta=document.createElement('textarea'); ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';
     document.body.appendChild(ta); ta.select(); let ok=false; try{ ok=document.execCommand('copy'); }catch(__){} ta.remove(); return ok; }
 }
 async function shareText(t, title){
+  if(NATIVE){ NATIVE.share(title||'Entretien', t); return; }   // v1.3 — menu de partage Android
   if(navigator.share){
     try{ await navigator.share({title, text:t}); return; }
     catch(e){ if(e && e.name==='AbortError') return; }
@@ -444,6 +484,7 @@ async function shareText(t, title){
   if(await copyText(t)) toast('Texte copié : collez-le dans Claude.'); else toast('Copie impossible sur cet appareil.');
 }
 function downloadText(t, name){
+  if(NATIVE){ toast(NATIVE.saveFile(name, t)); return; }   // v1.3 — dossier Téléchargements/PLAUD
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([t],{type:'text/plain;charset=utf-8'}));
   a.download=name; document.body.appendChild(a); a.click(); a.remove();
@@ -508,6 +549,7 @@ function delEntry(id, btn){
   renderHistory(); toast('Entretien supprimé');
 }
 $('bExport').onclick = ()=>{
+  if(NATIVE){ toast(NATIVE.saveFile('PLAUD_historique_'+today()+'.json', JSON.stringify(store.get(K_HIST,[]),null,1))); return; }   // v1.3
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([JSON.stringify(store.get(K_HIST,[]),null,1)],{type:'application/json'}));
   a.download='PLAUD_historique_'+today()+'.json'; document.body.appendChild(a); a.click(); a.remove();
@@ -549,8 +591,28 @@ addEventListener('online', net); addEventListener('offline', net); net();
 loadDraft(store.get(K_DRAFT, null));
 if(els.text.value.trim()){ els.bStart.textContent='Continuer'; setStatus('Brouillon restauré'); }
 
+/* ---------- v1.3 — Application Android : réglages inutiles masqués, journal technique,
+   reprise d'un enregistrement en cours ou récupération après fermeture de l'application ---------- */
+if(NATIVE){
+  $('bBlack').classList.add('hidden');
+  $('recHelp').textContent = "Application Android : vous pouvez verrouiller le téléphone, la transcription continue (notification « PLAUD Laurent » affichée) et le bip est coupé automatiquement.";
+  $('sWake').parentElement.classList.add('hidden');
+  $('sCont').parentElement.classList.add('hidden'); $('sCont').parentElement.nextElementSibling.classList.add('hidden');
+  const bLog = document.createElement('button'); bLog.className = 'btn'; bLog.textContent = 'Copier le journal technique';
+  bLog.onclick = ()=>{ NATIVE.copy(NATIVE.log()); toast('Journal copié : collez-le dans Claude en cas de souci'); };
+  $('tSet').lastElementChild.appendChild(bLog);
+  try{
+    const p = JSON.parse(NATIVE.poll(nSess, nIdx));
+    if(p.running){ startRecording(); }
+    else if(nSess && p.session === nSess && p.segs && p.segs.length){
+      p.segs.forEach(t=>{ nIdx++; appendFinal(t); });
+      els.bStart.textContent = 'Continuer'; setStatus("Transcription récupérée après fermeture de l'application",'warn');
+    }
+  }catch(_){}
+}
+
 /* ---------- Mode hors ligne / installation (seulement si publié en https) ---------- */
-if('serviceWorker' in navigator && location.protocol.startsWith('http')){
+if('serviceWorker' in navigator && location.protocol.startsWith('http') && !NATIVE){
   navigator.serviceWorker.register('sw.js').catch(()=>{});
 }
 </script>
