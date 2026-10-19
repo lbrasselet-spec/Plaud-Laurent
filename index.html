@@ -63,6 +63,7 @@ textarea{resize:vertical}
 .item .acts button{flex:1;padding:8px;border-radius:8px;border:1px solid var(--line);background:#fff;font-size:13px;color:var(--navy)}
 .empty{color:var(--muted);text-align:center;padding:20px 0}
 
+#black{position:fixed;inset:0;background:#000;color:#3a3a3a;z-index:50;display:flex;align-items:center;justify-content:center;text-align:center;font-size:14px;line-height:1.5}
 .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);
   background:#1C2430;color:#fff;padding:10px 16px;border-radius:20px;font-size:14px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%;text-align:center}
 .toast.show{opacity:.95}
@@ -117,6 +118,8 @@ textarea{resize:vertical}
       <button class="big stop" id="bStop" disabled>Arrêter</button>
     </div>
     <div class="interim" id="interim"></div>
+    <button class="btn" id="bBlack" disabled>Écran noir (discret, micro actif)</button>
+    <p class="help" style="text-align:left;margin-bottom:0">Le bip est émis par Android, pas par l'application : avant l'entretien, baissez le volume <b>Multimédia</b> à zéro et passez le téléphone en mode <b>Silencieux</b>. Pour poser le téléphone, utilisez « Écran noir » : un appui sur le bouton de veille coupe la transcription.</p>
   </div>
 
   <div class="card">
@@ -177,15 +180,18 @@ textarea{resize:vertical}
     </select>
     <label class="chk"><input type="checkbox" id="sWake"> Garder l'écran allumé pendant l'enregistrement</label>
     <label class="chk"><input type="checkbox" id="sPara"> Nouveau paragraphe après un silence de plus de 4 s</label>
+    <label class="chk"><input type="checkbox" id="sCont"> Mode continu : moins de bips (Chrome 157 ou plus récent)</label>
+    <p class="help">Avec Chrome 157 et suivants, l'écoute reste ouverte jusqu'à 5 minutes au lieu de redémarrer, et biper, à chaque phrase. Votre Chrome : version <b id="chromeV">?</b>. Si le texte se répète ou manque après activation, décochez.</p>
   </div>
   <div class="card">
     <h2>À propos</h2>
-    <p class="help">PLAUD Laurent v1.0 — usage privé. Transcription : reconnaissance vocale intégrée au navigateur (gratuite, connexion internet nécessaire). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
+    <p class="help">PLAUD Laurent v1.2 — usage privé. Transcription : reconnaissance vocale intégrée au navigateur (gratuite, connexion internet nécessaire). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
   </div>
 </section>
 </main>
 
 <div class="toast" id="toast"></div>
+<div id="black" class="hidden"><div>Transcription en cours<br><span id="blackChrono"></span><br><br>Touchez deux fois pour revenir</div></div>
 
 <script>
 /* =====================================================================
@@ -217,7 +223,7 @@ const store = {
 };
 const K_DRAFT='plaud.draft', K_HIST='plaud.history', K_SET='plaud.settings';
 
-let settings = Object.assign({prompt: DEFAULT_PROMPT, include: true, lang: 'fr-FR', wake: true, para: true}, store.get(K_SET, {}));
+let settings = Object.assign({prompt: DEFAULT_PROMPT, include: true, lang: 'fr-FR', wake: true, para: true, cont: false}, store.get(K_SET, {}));
 
 /* ---------- Raccourcis ---------- */
 const $ = id => document.getElementById(id);
@@ -261,6 +267,8 @@ function loadDraft(d){
    RECONNAISSANCE VOCALE (Web Speech API, gratuite, intégrée à Chrome)
    Sur Android, le mode continu duplique le texte : on enchaîne donc des
    sessions courtes redémarrées automatiquement.
+   v1.2 — Chaque redémarrage déclenche le bip d'Android. Chrome 157+ corrige
+   le mode continu sur Android (écoute jusqu'à 5 min) : option « Mode continu ».
    ===================================================================== */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const IS_ANDROID = /Android/i.test(navigator.userAgent);
@@ -293,12 +301,12 @@ function buildRecognizer(){
   const r = new SR();
   r.lang = settings.lang;
   r.interimResults = true;
-  r.continuous = !IS_ANDROID;
+  r.continuous = !IS_ANDROID || settings.cont;
   r.maxAlternatives = 1;
   r.onresult = e => {
     errStreak = 0;
     let interim = '';
-    if(IS_ANDROID){
+    if(IS_ANDROID && !r.continuous){
       const res = e.results[e.results.length-1];
       if(res.isFinal) appendFinal(res[0].transcript); else interim = res[0].transcript;
     } else {
@@ -330,16 +338,38 @@ function buildRecognizer(){
   return r;
 }
 
+const WAKE_MSG = "Le téléphone refuse de garder l'écran allumé : désactivez l'économie d'énergie ou allongez le délai de mise en veille de l'écran.";
 async function keepAwake(on){
   try{
-    if(on && settings.wake && 'wakeLock' in navigator){ wakeLock = await navigator.wakeLock.request('screen'); }
+    if(on && settings.wake){
+      if(!('wakeLock' in navigator)) { toast(WAKE_MSG); return; }
+      wakeLock = await navigator.wakeLock.request('screen');
+    }
     else if(!on && wakeLock){ await wakeLock.release(); wakeLock = null; }
-  }catch(_){}
+  }catch(_){ if(on) toast(WAKE_MSG); }
 }
-document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && state==='live') keepAwake(true); });
+
+/* v1.1 — Mise en veille : Android coupe le micro quand l'écran s'éteint.
+   On marque l'interruption dans le texte et on reprend automatiquement au réveil. */
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='hidden' && state==='live'){
+    state='suspended'; try{ rec.stop(); }catch(_){} stopTimer(); hideBlack();
+    if(els.text.value.trim()){ els.text.value += '\n\n[Interruption : téléphone en veille]\n\n'; lastFinalAt = 0; saveDraft(); }
+  } else if(document.visibilityState==='visible' && state==='suspended'){
+    state='paused'; startRecording();
+    toast("Transcription reprise. Ce qui a été dit pendant la veille n'a pas été capté.");
+  }
+});
+
+/* v1.1 — Mode écran noir : l'écran reste allumé (micro actif) mais affiche du noir. */
+const black = $('black'); let blackTap = 0;
+function showBlack(){ if(state!=='live') return; black.classList.remove('hidden'); }
+function hideBlack(){ black.classList.add('hidden'); }
+$('bBlack').onclick = showBlack;
+black.addEventListener('click', ()=>{ const n=Date.now(); if(n-blackTap<450){ hideBlack(); blackTap=0; } else blackTap=n; });
 
 function startTimer(){ tickStart = Date.now(); const base = elapsed;
-  timer = setInterval(()=>{ elapsed = base + (Date.now()-tickStart)/1000; els.chrono.textContent = fmtTime(elapsed); }, 500); }
+  timer = setInterval(()=>{ elapsed = base + (Date.now()-tickStart)/1000; els.chrono.textContent = fmtTime(elapsed); $('blackChrono').textContent = fmtTime(elapsed); }, 500); }
 function stopTimer(){ clearInterval(timer); timer=null; saveDraft(); }
 
 function startRecording(){
@@ -347,17 +377,18 @@ function startRecording(){
   if(state==='live') return;
   rec = rec || buildRecognizer();
   rec.lang = settings.lang;
+  rec.continuous = !IS_ANDROID || settings.cont;
   state = 'live'; errStreak = 0;
   try{ rec.start(); }catch(_){}
   startTimer(); keepAwake(true);
   setStatus('<span class="dot"></span>Enregistrement en cours','live');
   els.bStart.disabled = true; els.bPause.disabled = false; els.bStop.disabled = false;
-  els.bPause.textContent = 'Pause';
+  els.bPause.textContent = 'Pause'; $('bBlack').disabled = false;
 }
 function pauseRecording(){
   if(state==='live'){
     state='paused'; try{ rec.stop(); }catch(_){} stopTimer(); keepAwake(false);
-    setStatus('En pause','warn'); els.bPause.textContent='Reprendre';
+    setStatus('En pause','warn'); els.bPause.textContent='Reprendre'; $('bBlack').disabled = true; hideBlack();
   } else if(state==='paused'){
     els.bStart.disabled=false; startRecording();
   }
@@ -368,7 +399,7 @@ function stopRecording(){
   setStatus(els.text.value.trim() ? 'Enregistrement terminé — envoyez le texte à Claude' : 'Prêt à enregistrer');
   els.bStart.disabled = !SR; els.bPause.disabled = true; els.bStop.disabled = true;
   els.bStart.textContent = els.text.value.trim() ? 'Continuer' : 'Démarrer';
-  els.bPause.textContent = 'Pause';
+  els.bPause.textContent = 'Pause'; $('bBlack').disabled = true; hideBlack();
 }
 els.bStart.onclick = startRecording;
 els.bPause.onclick = pauseRecording;
@@ -505,6 +536,9 @@ $('sInclude').onchange = e=>{ settings.include=e.target.checked; saveSettings();
 $('sLang').onchange = e=>{ settings.lang=e.target.value; saveSettings(); };
 $('sWake').onchange = e=>{ settings.wake=e.target.checked; saveSettings(); };
 $('sPara').onchange = e=>{ settings.para=e.target.checked; saveSettings(); };
+$('sCont').checked = settings.cont;
+$('sCont').onchange = e=>{ settings.cont=e.target.checked; saveSettings(); toast('Pris en compte au prochain démarrage'); };
+$('chromeV').textContent = (navigator.userAgent.match(/Chrome\/(\d+)/)||[])[1] || 'inconnue';
 $('bResetPrompt').onclick = ()=>{ settings.prompt=DEFAULT_PROMPT; $('sPrompt').value=DEFAULT_PROMPT; saveSettings(); toast("Consigne d'origine rétablie"); };
 
 /* ---------- État réseau ---------- */
