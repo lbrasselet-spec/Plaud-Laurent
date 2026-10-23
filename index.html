@@ -183,9 +183,17 @@ textarea{resize:vertical}
     <label class="chk"><input type="checkbox" id="sCont"> Mode continu : moins de bips (Chrome 157 ou plus récent)</label>
     <p class="help">Avec Chrome 157 et suivants, l'écoute reste ouverte jusqu'à 5 minutes au lieu de redémarrer, et biper, à chaque phrase. Votre Chrome : version <b id="chromeV">?</b>. Si le texte se répète ou manque après activation, décochez.</p>
   </div>
+  <!-- v1.4 — Application Android seulement : choix du moteur de reconnaissance vocale -->
+  <div class="card hidden" id="cEngine">
+    <h2>Moteur de transcription</h2>
+    <label for="sEngine">Moteur utilisé</label>
+    <select id="sEngine"></select>
+    <p class="help">La liste montre les moteurs de reconnaissance vocale installés sur ce téléphone qui acceptent d'être utilisés par une autre application. Si Voice Inc y figure, choisissez-le puis faites un essai de 30 secondes. S'il ne répond pas, l'application revient d'elle-même au moteur Google pour ne rien perdre.</p>
+    <p class="help">Voice Inc absent de la liste ? Enregistrez dans Voice Inc, puis touchez « Partager » sur sa transcription et choisissez <b>PLAUD Laurent</b> : le texte arrive ici comme un entretien, prêt à être envoyé à Claude.</p>
+  </div>
   <div class="card">
     <h2>À propos</h2>
-    <p class="help">PLAUD Laurent v1.3 — usage privé. Transcription : reconnaissance vocale intégrée au navigateur (gratuite, connexion internet nécessaire). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
+    <p class="help">PLAUD Laurent v1.4 — usage privé. Transcription : reconnaissance vocale intégrée au navigateur (gratuite, connexion internet nécessaire). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
   </div>
 </section>
 </main>
@@ -360,6 +368,8 @@ function buildRecognizer(){
       errStreak++; setStatus('Micro indisponible (utilisé par une autre application ?)','warn');
     } else if(e.error==='service'){   // v1.3 — application Android
       stopRecording(); setStatus("L'enregistrement s'est interrompu : appuyez sur Continuer pour reprendre.",'warn');
+    } else if(e.error==='engine'){    // v1.4 — le moteur choisi ne répond pas
+      errStreak++; setStatus('Le moteur choisi ne répond pas : retour au moteur Google, la transcription continue.','warn');
     }
     /* no-speech / aborted : normal, la session redémarre */
   };
@@ -601,6 +611,32 @@ if(NATIVE){
   const bLog = document.createElement('button'); bLog.className = 'btn'; bLog.textContent = 'Copier le journal technique';
   bLog.onclick = ()=>{ NATIVE.copy(NATIVE.log()); toast('Journal copié : collez-le dans Claude en cas de souci'); };
   $('tSet').lastElementChild.appendChild(bLog);
+  /* v1.4 — Choix du moteur de reconnaissance vocale */
+  try{
+    const en = JSON.parse(NATIVE.engines()), sel = $('sEngine');
+    const add = (v, t)=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); };
+    add('', 'Automatique (Google)');
+    en.list.filter(m=>!/^com\.google\./.test(m.pkg)).forEach(m=>add(m.id, m.label));
+    en.list.filter(m=>/^com\.google\./.test(m.pkg)).forEach(m=>add(m.id, m.label));
+    sel.value = en.list.some(m=>m.id===en.chosen) ? en.chosen : '';
+    sel.onchange = e=>{ NATIVE.setEngine(e.target.value); toast('Pris en compte au prochain démarrage'); };
+    $('cEngine').classList.remove('hidden');
+  }catch(_){}
+  /* v1.4 — Texte reçu par « Partager » depuis une autre application (ex. Voice Inc) */
+  window.plaudShared = ()=>{
+    let t = ''; try{ t = NATIVE.takeShared(); }catch(_){}
+    if(!t) return;
+    document.querySelector('nav button[data-tab="tRec"]').click();
+    if(state!=='idle' || !els.text.value.trim()){   // enregistrement en cours ou entretien vide : on ajoute le texte
+      const cur = els.text.value.trim();
+      els.text.value = cur ? cur+'\n\n[Texte reçu d’une autre application]\n'+t : t;
+      saveDraft(); toast('Texte reçu');
+    } else {                                         // un entretien est déjà rempli : il est archivé, le texte en ouvre un nouveau
+      autoArchive(); loadDraft({text:t}); saveDraft(); lastFinalAt=0; lastFinalTxt='';
+      toast('Texte reçu — entretien précédent archivé');
+    }
+    if(state==='idle'){ els.bStart.textContent='Continuer'; setStatus('Texte reçu — complétez la fiche puis envoyez à Claude'); }
+  };
   try{
     const p = JSON.parse(NATIVE.poll(nSess, nIdx));
     if(p.running){ startRecording(); }
@@ -609,6 +645,7 @@ if(NATIVE){
       els.bStart.textContent = 'Continuer'; setStatus("Transcription récupérée après fermeture de l'application",'warn');
     }
   }catch(_){}
+  plaudShared();   // v1.4 — application ouverte par « Partager »
 }
 
 /* ---------- Mode hors ligne / installation (seulement si publié en https) ---------- */
