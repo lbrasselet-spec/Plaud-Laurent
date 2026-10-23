@@ -48,9 +48,11 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -70,11 +72,16 @@ import java.util.Locale;
  * La page dialogue avec ce code par l'objet JavaScript « PlaudNative ».
  * Les phrases reconnues sont conservées dans un fichier (Store) : rien n'est perdu si la page
  * est fermée ou l'écran éteint ; elle les récupère dès qu'elle est de nouveau affichée.
+ *
+ * v1.4 — Moteur de reconnaissance au choix (Réglages) parmi ceux installés sur le téléphone,
+ * avec retour automatique à Google si le moteur choisi ne répond pas. L'application reçoit
+ * aussi le texte « partagé » par une autre application (ex. une transcription Voice Inc).
  */
 public class MainActivity extends Activity {
 
     static final String ORIGIN = "https://appassets.androidplatform.net/";
     private static final int REQ_PERMS = 1, REQ_FILE = 2;
+    private static String shared;   // v1.4 — texte reçu par « Partager », en attente pour la page
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
@@ -129,8 +136,49 @@ public class MainActivity extends Activity {
                 }
             }
         });
+        if (state == null) receive(getIntent());
         web.loadUrl(ORIGIN + "index.html");
         if (!askPermissions()) askBatteryOnce();
+    }
+
+    /** v1.4 — Application déjà ouverte : le texte partagé est transmis tout de suite à la page. */
+    @Override
+    protected void onNewIntent(Intent i) {
+        super.onNewIntent(i);
+        setIntent(i);
+        if (receive(i) && web != null) web.evaluateJavascript("window.plaudShared && plaudShared()", null);
+    }
+
+    /** v1.4 — Garde le texte (ou le fichier .txt) envoyé par « Partager » depuis une autre application. */
+    private boolean receive(Intent i) {
+        if (i == null || !Intent.ACTION_SEND.equals(i.getAction())) return false;
+        CharSequence cs = i.getCharSequenceExtra(Intent.EXTRA_TEXT);
+        String t = cs == null ? null : cs.toString();
+        if (t == null || t.trim().isEmpty()) {
+            Uri u = i.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (u != null) t = read(u);
+        }
+        if (t == null || t.trim().isEmpty()) {
+            Store.log("partage reçu sans texte");
+            return false;
+        }
+        synchronized (MainActivity.class) { shared = t.trim(); }
+        Store.log("texte reçu par partage : " + t.length() + " caractères");
+        return true;
+    }
+
+    private String read(Uri u) {
+        try (InputStream in = getContentResolver().openInputStream(u)) {
+            if (in == null) return null;
+            ByteArrayOutputStream b = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0 && b.size() < 2_000_000) b.write(buf, 0, n);
+            return b.toString("UTF-8");
+        } catch (Exception e) {
+            Store.log("fichier partagé illisible : " + e);
+            return null;
+        }
     }
 
     /** Sert les fichiers de la page (assets/www) sous une adresse https locale. */
@@ -282,16 +330,60 @@ public class MainActivity extends Activity {
         public String log() {
             return Store.dump();
         }
+
+        /** v1.4 — Moteurs de reconnaissance vocale installés et moteur choisi ("" = automatique). */
+        @JavascriptInterface
+        public String engines() {
+            try {
+                PackageManager pm = getPackageManager();
+                JSONArray a = new JSONArray();
+                for (ResolveInfo r : pm.queryIntentServices(new Intent(RecognitionService.SERVICE_INTERFACE), 0)) {
+                    if (r.serviceInfo == null) continue;
+                    String app = String.valueOf(r.serviceInfo.applicationInfo.loadLabel(pm));
+                    String svc = String.valueOf(r.loadLabel(pm));
+                    a.put(new JSONObject()
+                            .put("id", new ComponentName(r.serviceInfo.packageName, r.serviceInfo.name).flattenToShortString())
+                            .put("label", app.equals(svc) ? app : app + " — " + svc)
+                            .put("pkg", r.serviceInfo.packageName));
+                }
+                return new JSONObject().put("chosen", Rec.chosen(MainActivity.this)).put("list", a).toString();
+            } catch (Exception e) {
+                Store.log("liste des moteurs : " + e);
+                return "{\"chosen\":\"\",\"list\":[]}";
+            }
+        }
+
+        @JavascriptInterface
+        public void setEngine(String id) {
+            if (id == null) id = "";
+            getSharedPreferences(Rec.PREFS, MODE_PRIVATE).edit().putString(Rec.ENGINE, id).apply();
+            Store.log("moteur choisi : " + (id.isEmpty() ? "automatique (Google)" : id));
+        }
+
+        /** v1.4 — Texte reçu par « Partager » (vide s'il n'y en a pas) ; il n'est remis qu'une fois. */
+        @JavascriptInterface
+        public String takeShared() {
+            synchronized (MainActivity.class) {
+                String t = shared;
+                shared = null;
+                return t == null ? "" : t;
+            }
+        }
     }
 
     /**
-     * Service d'enregistrement : reconnaissance vocale de Google, relancée automatiquement,
-     * sons système coupés, processeur maintenu éveillé écran éteint.
+     * Service d'enregistrement : reconnaissance vocale (Google, ou le moteur choisi dans les
+     * Réglages), relancée automatiquement, sons système coupés, processeur maintenu éveillé écran éteint.
      */
     public static class Rec extends Service {
         static final String START = "fr.brasselet.plaud.START";
+        static final String PREFS = "plaud", ENGINE = "engine";
         static volatile Rec instance;
         private static final String CHANNEL = "enregistrement";
+
+        static String chosen(Context c) {
+            return c.getSharedPreferences(PREFS, MODE_PRIVATE).getString(ENGINE, "");
+        }
 
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final ArrayList<Integer> muted = new ArrayList<>();
@@ -301,6 +393,7 @@ public class MainActivity extends Activity {
         private PowerManager.WakeLock wakeLock;
         private String lang = "fr-FR";
         private boolean active, listening;
+        private boolean heard, fallback;   // v1.4 — le moteur choisi a-t-il déjà rendu du texte / abandonné pour Google
         private int errors, lastStartId;
 
         private final BroadcastReceiver screen = new BroadcastReceiver() {
@@ -456,7 +549,10 @@ public class MainActivity extends Activity {
             return null;
         }
 
-        /** Même choix que Chrome : « Speech Services by Google » (Android 12+), sinon l'appli Google. */
+        /**
+         * v1.4 — Le moteur choisi dans les Réglages s'il est installé ; sinon même choix que Chrome :
+         * « Speech Services by Google » (Android 12+), sinon l'appli Google.
+         */
         private ComponentName provider() {
             String[] order = Build.VERSION.SDK_INT >= 31
                     ? new String[]{"com.google.android.tts", "com.google.android.googlequicksearchbox"}
@@ -465,6 +561,15 @@ public class MainActivity extends Activity {
             StringBuilder seen = new StringBuilder();
             for (ResolveInfo r : list) if (r.serviceInfo != null) seen.append(r.serviceInfo.packageName).append(' ');
             Store.log("services disponibles : " + seen);
+            String want = fallback ? "" : chosen(this);
+            ComponentName c = want.isEmpty() ? null : ComponentName.unflattenFromString(want);
+            if (c != null) {
+                for (ResolveInfo r : list)
+                    if (r.serviceInfo != null && c.getPackageName().equals(r.serviceInfo.packageName)
+                            && c.getClassName().equals(r.serviceInfo.name))
+                        return c;
+                Store.log("moteur choisi absent du téléphone : " + want + " — Google utilisé");
+            }
             for (String p : order)
                 for (ResolveInfo r : list)
                     if (r.serviceInfo != null && p.equals(r.serviceInfo.packageName))
@@ -561,6 +666,7 @@ public class MainActivity extends Activity {
             Store.interim("");
             Store.error("");
             errors = 0;
+            heard = true;
         }
 
         private void next() {
@@ -576,6 +682,14 @@ public class MainActivity extends Activity {
 
         private void retry(boolean recreate) {
             errors++;
+            // v1.4 — Le moteur choisi échoue 5 fois sans rien rendre : on bascule sur Google
+            // pour ne pas perdre l'entretien (la page affiche un avertissement).
+            if (errors >= 5 && !heard && !fallback && !chosen(this).isEmpty()) {
+                fallback = true;
+                recreate = true;
+                Store.log("le moteur choisi ne répond pas — retour au moteur Google");
+                Store.error("engine");
+            }
             schedule(Math.min(10000L, 500L * errors), recreate);
         }
 
@@ -599,6 +713,7 @@ public class MainActivity extends Activity {
 
         private void finish() {
             active = false;
+            heard = fallback = false;   // v1.4 — le prochain enregistrement réessaie le moteur choisi
             handler.removeCallbacks(listenTask);
             handler.removeCallbacks(finishTask);
             destroyRecognizer();
