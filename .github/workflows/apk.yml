@@ -91,10 +91,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Numéro de version lu dans android/build.gradle (ex. « 1.4. ») : toujours à jour.
+          V=$(sed -n "s/.*versionName '\([0-9.]*\)'.*/\1/p" android/build.gradle)${{ github.run_number }}
           gh release view apk >/dev/null 2>&1 || gh release create apk --title "PLAUD Laurent — application Android" --notes "Application Android à installer sur le téléphone."
           gh release upload apk PLAUD-Laurent.apk --clobber
-          gh release edit apk --notes "Version 1.3.${{ github.run_number }} du $(TZ=Europe/Paris date '+%d/%m/%Y à %H:%M'). Téléchargez PLAUD-Laurent.apk ci-dessous."
-          echo "::notice::APK publié (version 1.3.${{ github.run_number }}) : https://github.com/${{ github.repository }}/releases/download/apk/PLAUD-Laurent.apk"
+          gh release edit apk --notes "Version $V du $(TZ=Europe/Paris date '+%d/%m/%Y à %H:%M'). Téléchargez PLAUD-Laurent.apk ci-dessous."
+          echo "::notice::APK publié (version $V) : https://github.com/${{ github.repository }}/releases/download/apk/PLAUD-Laurent.apk"
 
       - uses: actions/upload-artifact@v4
         with:
