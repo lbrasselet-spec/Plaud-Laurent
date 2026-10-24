@@ -5,6 +5,8 @@
 # La clé de signature n'est pas dans le dépôt : elle est enregistrée dans le secret GitHub
 # PLAUD_KEYSTORE_B64 (Settings > Secrets and variables > Actions). Sans ce secret, l'APK est
 # signé avec une clé provisoire et n'est PAS publié (version de contrôle uniquement).
+# v1.5 — L'APK contient aussi Whisper (transcription sur le téléphone) : les sources de
+# whisper.cpp (version figée) et le petit modèle de détection de la parole sont téléchargés ici.
 name: Application Android
 
 on:
@@ -23,7 +25,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -41,14 +43,25 @@ jobs:
         run: |
           P=projet
           J=$P/app/src/main/java/fr/brasselet/plaud
-          mkdir -p $J $P/app/src/main/assets/www $P/app/src/main/res/mipmap-xxxhdpi
+          mkdir -p $J $P/app/src/main/assets/www $P/app/src/main/cpp $P/app/src/main/res/mipmap-xxxhdpi
           cp android/settings.gradle $P/
           cp android/build.gradle $P/app/
           cp android/AndroidManifest.xml $P/app/src/main/
-          cp android/MainActivity.java $J/
+          cp android/*.java $J/
+          # v1.5 — Whisper : pont JNI, sources whisper.cpp, modèle de détection de la parole
+          cp android/jni/* $P/app/src/main/cpp/
+          git -c advice.detachedHead=false clone -q --depth 1 --branch v1.9.5 https://github.com/ggml-org/whisper.cpp.git $P/whisper.cpp
+          curl -sSfL --retry 3 -o $P/app/src/main/assets/ggml-silero-v6.2.0.bin https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin
           cp index.html icon-192.png $P/app/src/main/assets/www/
           cp icon-192.png $P/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
           printf 'org.gradle.jvmargs=-Xmx3g\n' > $P/gradle.properties
+
+      - name: Outils de compilation native (NDK, CMake)
+        shell: bash
+        run: |
+          S="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          (yes || true) | "$S" --licenses > /dev/null || true
+          "$S" --install "ndk;27.2.12479018" "cmake;3.22.1" > /dev/null
 
       - name: Clé de signature
         shell: bash
@@ -108,7 +121,7 @@ jobs:
   test:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -141,6 +154,17 @@ jobs:
           echo "::notice title=Service d'enregistrement::$S"
           echo "::notice title=Journal de l'application::$(grep ' PLAUD' logcat.txt | sed 's/.* PLAUD *: //' | head -60 | enc)"
           echo "::notice title=Écran::$(grep -o 'text="[^"]*"' ui.xml | sed 's/text="//;s/"$//' | grep -v '^$' | head -40 | enc)"
+          # v1.5 — Whisper : l'application télécharge le modèle d'essai et transcrit une phrase d'exemple
+          adb shell am force-stop $P
+          adb logcat -c
+          adb shell am start -n $P/.MainActivity --ez whisper_test true
+          for i in $(seq 1 72); do sleep 5; adb logcat -d | grep -q "test whisper : fin" && break; done
+          adb logcat -d > whisper.txt
+          echo "::notice title=Test Whisper::$(grep ' PLAUD' whisper.txt | sed 's/.* PLAUD *: //' | grep -i -E 'whisper|modèle|téléchargement|parole' | head -30 | enc)"
+          if grep -q -E "FATAL EXCEPTION|Fatal signal" whisper.txt; then
+            echo "::error title=Plantage Whisper::$(grep -A 25 -E 'FATAL EXCEPTION|Fatal signal' whisper.txt | head -40 | enc)"
+          fi
+          grep -q "test whisper : code 0 " whisper.txt || echo "::error title=Test Whisper::La transcription d'essai n'a pas abouti (voir la note Test Whisper)."
           EOF
 
       - uses: reactivecircus/android-emulator-runner@v2
