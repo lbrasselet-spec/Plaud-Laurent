@@ -15,6 +15,7 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
@@ -55,6 +56,8 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
@@ -62,6 +65,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 /**
  * PLAUD Laurent — application Android.
@@ -76,6 +80,10 @@ import java.util.Locale;
  * v1.4 — Moteur de reconnaissance au choix (Réglages) parmi ceux installés sur le téléphone,
  * avec retour automatique à Google si le moteur choisi ne répond pas. L'application reçoit
  * aussi le texte « partagé » par une autre application (ex. une transcription Voice Inc).
+ *
+ * v1.5 — Moteur « Whisper sur le téléphone » : le son est enregistré pendant l'entretien,
+ * puis transcrit sur le téléphone à l'arrêt, sans internet (voir Whisper.java et android/jni).
+ * Un moteur choisi qui reste muet 30 s bascule aussi sur Google (cas de FUTO Voice Input).
  */
 public class MainActivity extends Activity {
 
@@ -100,6 +108,7 @@ public class MainActivity extends Activity {
         s.setAllowFileAccess(false);
         web.addJavascriptInterface(new Bridge(), "PlaudNative");
         final boolean autotest = getIntent().getBooleanExtra("autotest", false);
+        final boolean whisperTest = getIntent().getBooleanExtra("whisper_test", false);
         web.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
@@ -119,6 +128,7 @@ public class MainActivity extends Activity {
                 Store.log("page chargée");
                 // Test automatique (compilation GitHub) : démarre un enregistrement sans intervention.
                 if (autotest) v.evaluateJavascript("document.getElementById('bStart').click()", null);
+                if (whisperTest) new Thread(MainActivity.this::whisperSelfTest, "plaud-test").start();
             }
         });
         web.setWebChromeClient(new WebChromeClient() {
@@ -248,6 +258,48 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    /**
+     * v1.5 — Test automatique (compilation GitHub) : télécharge le petit modèle d'essai et une
+     * phrase d'exemple, puis la transcrit. Le résultat est écrit dans le journal (« test whisper »).
+     */
+    private void whisperSelfTest() {
+        try {
+            if (!Whisper.available()) {
+                Store.log("test whisper : bibliothèque absente — " + Whisper.LOAD_ERROR);
+                return;
+            }
+            Store.log("test whisper : processeur " + Whisper.info());
+            SharedPreferences p = getSharedPreferences(Rec.PREFS, MODE_PRIVATE);
+            if (Whisper.Models.ready(this, "essai") == null) Whisper.Models.download(this, "essai");
+            long end = System.currentTimeMillis() + 240_000;
+            while (Whisper.Models.ready(this, "essai") == null && p.getLong("dl_essai", -1) >= 0 && System.currentTimeMillis() < end)
+                Thread.sleep(2000);
+            String model = Whisper.Models.ready(this, "essai");
+            if (model == null) {
+                Store.log("test whisper : modèle d'essai non téléchargé — " + Whisper.Models.state(this));
+                return;
+            }
+            File wav = new File(getFilesDir(), "jfk.wav");
+            HttpURLConnection c = (HttpURLConnection) new URL("https://raw.githubusercontent.com/ggml-org/whisper.cpp/v1.9.5/samples/jfk.wav").openConnection();
+            try (InputStream in = c.getInputStream(); FileOutputStream o = new FileOutputStream(wav)) {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+            }
+            final StringBuilder text = new StringBuilder();
+            long t0 = System.currentTimeMillis();
+            int rc = Whisper.run(model, Whisper.vadModel(this), wav.getAbsolutePath(), "en", "", 4, 0, new Whisper.Listener() {
+                @Override public void onSegment(byte[] utf8, long a, long b) { text.append(new String(utf8, StandardCharsets.UTF_8)); }
+                @Override public void onProgress(int percent) { }
+            });
+            Store.log("test whisper : code " + rc + " en " + (System.currentTimeMillis() - t0) + " ms — " + text.toString().trim());
+        } catch (Exception e) {
+            Store.log("test whisper : " + e);
+        } finally {
+            Store.log("test whisper : fin");
+        }
+    }
+
     /** Fonctions appelées par la page (window.PlaudNative). */
     final class Bridge {
 
@@ -360,6 +412,138 @@ public class MainActivity extends Activity {
             Store.log("moteur choisi : " + (id.isEmpty() ? "automatique (Google)" : id));
         }
 
+        /** v1.5 — État des modèles Whisper (bibliothèque présente, téléchargements, modèle choisi). */
+        @JavascriptInterface
+        public String models() {
+            return Whisper.Models.state(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void setModel(String id) {
+            if (Whisper.Models.get(id) == null) return;
+            getSharedPreferences(Rec.PREFS, MODE_PRIVATE).edit().putString(Whisper.Models.CHOSEN, id).apply();
+            Store.log("modèle Whisper choisi : " + id);
+        }
+
+        @JavascriptInterface
+        public void download(String id) {
+            try { Whisper.Models.download(MainActivity.this, id); } catch (Exception e) { Store.log("téléchargement : " + e); }
+        }
+
+        @JavascriptInterface
+        public void cancelDownload(String id) {
+            Whisper.Models.cancel(MainActivity.this, id);
+        }
+
+        @JavascriptInterface
+        public void deleteModel(String id) {
+            Whisper.Models.delete(MainActivity.this, id);
+        }
+
+        /** v1.5 — Démarre l'enregistrement audio (mode Whisper). prompt : vocabulaire à reconnaître. */
+        @JavascriptInterface
+        public String wstart(String lang, String prompt) {
+            try {
+                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    runOnUiThread(MainActivity.this::askPermissions);
+                    return "{\"ok\":false,\"error\":\"not-allowed\"}";
+                }
+                Rec r = Rec.instance;
+                if (r != null && r.busy()) return "{\"ok\":false,\"error\":\"busy\"}";
+                if (r != null && r.recording()) return new JSONObject().put("ok", true).put("session", Store.open()).toString();
+                if (Whisper.Models.ready(MainActivity.this, Whisper.Models.chosen(MainActivity.this)) == null)
+                    return "{\"ok\":false,\"error\":\"w-model\"}";
+                if (getFilesDir().getUsableSpace() < 300_000_000L) return "{\"ok\":false,\"error\":\"space\"}";
+                String session = Store.open();
+                Store.mode("whisper");
+                getSharedPreferences(Rec.PREFS, MODE_PRIVATE).edit()
+                        .putString(Rec.W_LANG, lang == null || lang.isEmpty() ? "fr-FR" : lang)
+                        .putString(Rec.W_PROMPT, prompt == null ? "" : prompt)
+                        .putBoolean(Rec.W_PENDING, false).putLong(Rec.W_DONE, 0).apply();
+                startForegroundService(new Intent(MainActivity.this, Rec.class).setAction(Rec.START).putExtra("whisper", true));
+                return new JSONObject().put("ok", true).put("session", session).toString();
+            } catch (Exception e) {
+                Store.fail("service");
+                Store.log("démarrage Whisper : " + e);
+                return "{\"ok\":false,\"error\":\"service\"}";
+            }
+        }
+
+        @JavascriptInterface
+        public void wpause(boolean on) {
+            final Rec r = Rec.instance;
+            if (r != null) runOnUiThread(() -> r.pauseAudio(on));
+        }
+
+        /** v1.5 — Arrête l'enregistrement audio : la transcription démarre aussitôt. */
+        @JavascriptInterface
+        public void wstop() {
+            final Rec r = Rec.instance;
+            if (r != null) runOnUiThread(r::stopAudio);
+            else Store.close();
+        }
+
+        @JavascriptInterface
+        public void wcancel() {
+            if (Whisper.available()) Whisper.abort();
+        }
+
+        /** v1.5 — Reprend une transcription interrompue là où elle s'était arrêtée. */
+        @JavascriptInterface
+        public String wresume() {
+            try {
+                Rec r = Rec.instance;
+                if (r != null && (r.busy() || r.recording())) return "{\"ok\":false,\"error\":\"busy\"}";
+                if (Whisper.Models.ready(MainActivity.this, Whisper.Models.chosen(MainActivity.this)) == null)
+                    return "{\"ok\":false,\"error\":\"w-model\"}";
+                String session = Store.open();
+                Store.mode("whisper");
+                startForegroundService(new Intent(MainActivity.this, Rec.class).setAction(Rec.TRANSCRIBE));
+                return new JSONObject().put("ok", true).put("session", session).toString();
+            } catch (Exception e) {
+                Store.fail("service");
+                Store.log("reprise Whisper : " + e);
+                return "{\"ok\":false,\"error\":\"service\"}";
+            }
+        }
+
+        /** v1.5 — Copie le dernier enregistrement audio dans Musique/PLAUD Laurent (pour l'écouter ou le garder). */
+        @JavascriptInterface
+        public String saveAudio(String name) {
+            File wav = Rec.audio(MainActivity.this);
+            Rec r = Rec.instance;
+            if (r != null && r.recording()) return "Arrêtez d'abord l'enregistrement";
+            if (wav.length() <= 44) return "Aucun enregistrement audio";
+            try (InputStream in = new FileInputStream(wav)) {
+                OutputStream out;
+                String where;
+                if (Build.VERSION.SDK_INT >= 29) {
+                    ContentValues v = new ContentValues();
+                    v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                    v.put(MediaStore.MediaColumns.MIME_TYPE, "audio/wav");
+                    v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/PLAUD Laurent");
+                    Uri uri = getContentResolver().insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, v);
+                    if (uri == null) throw new Exception("stockage indisponible");
+                    out = getContentResolver().openOutputStream(uri);
+                    where = "Musique/PLAUD Laurent : " + name;
+                } else {
+                    File f = new File(getExternalFilesDir(Environment.DIRECTORY_MUSIC), name);
+                    out = new FileOutputStream(f);
+                    where = f.getAbsolutePath();
+                }
+                if (out == null) throw new Exception("stockage indisponible");
+                try (OutputStream o = out) {
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+                }
+                return "Audio enregistré dans " + where;
+            } catch (Exception e) {
+                Store.log("audio : " + e);
+                return "Enregistrement de l'audio impossible : " + e.getMessage();
+            }
+        }
+
         /** v1.4 — Texte reçu par « Partager » (vide s'il n'y en a pas) ; il n'est remis qu'une fois. */
         @JavascriptInterface
         public String takeShared() {
@@ -377,24 +561,53 @@ public class MainActivity extends Activity {
      */
     public static class Rec extends Service {
         static final String START = "fr.brasselet.plaud.START";
-        static final String PREFS = "plaud", ENGINE = "engine";
+        static final String TRANSCRIBE = "fr.brasselet.plaud.TRANSCRIBE";   // v1.5 — reprise d'une transcription Whisper
+        static final String PREFS = "plaud", ENGINE = "engine", WHISPER = "whisper";
+        // v1.5 — réglages de la transcription Whisper en cours, gardés pour pouvoir la reprendre
+        static final String W_LANG = "w_lang", W_PROMPT = "w_prompt", W_DONE = "w_done", W_PENDING = "w_pending";
         static volatile Rec instance;
         private static final String CHANNEL = "enregistrement";
+        // Phrases que Whisper invente parfois sur du bruit (sous-titres de vidéos vues à l'entraînement).
+        private static final Pattern JUNK = Pattern.compile("(?i)sous-titr|amara\\.org|merci d'avoir regard|abonnez-vous|radio-canada");
 
         static String chosen(Context c) {
             return c.getSharedPreferences(PREFS, MODE_PRIVATE).getString(ENGINE, "");
+        }
+
+        /** v1.5 — Moteur de la transcription en direct : Whisper n'en est pas un, Google le remplace alors. */
+        static String liveEngine(Context c) {
+            String e = chosen(c);
+            return WHISPER.equals(e) ? "" : e;
+        }
+
+        /** v1.5 — Dernier enregistrement audio du mode Whisper. */
+        static File audio(Context c) {
+            return new File(c.getFilesDir(), "entretien.wav");
         }
 
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final ArrayList<Integer> muted = new ArrayList<>();
         private final Runnable listenTask = this::listen;
         private final Runnable finishTask = this::finish;
+        private final Runnable engineCheck = this::checkEngine;
         private SpeechRecognizer recognizer;
         private PowerManager.WakeLock wakeLock;
         private String lang = "fr-FR";
         private boolean active, listening;
         private boolean heard, fallback;   // v1.4 — le moteur choisi a-t-il déjà rendu du texte / abandonné pour Google
         private int errors, lastStartId;
+        // v1.5 — mode Whisper ; lus aussi par la page (Bridge), d'où volatile
+        private volatile Whisper.Recorder recorder;   // enregistrement audio en cours
+        private volatile Thread transcriber;          // transcription en cours
+        private int shownPct = -1;
+
+        boolean recording() {
+            return recorder != null;
+        }
+
+        boolean busy() {
+            return transcriber != null;
+        }
 
         private final BroadcastReceiver screen = new BroadcastReceiver() {
             @Override
@@ -426,24 +639,34 @@ public class MainActivity extends Activity {
         @Override
         public int onStartCommand(Intent intent, int flags, int startId) {
             lastStartId = startId;
-            if (intent == null || !START.equals(intent.getAction())) {
+            String action = intent == null ? null : intent.getAction();
+            if (TRANSCRIBE.equals(action)) {   // v1.5
+                if (!foreground("Transcription Whisper en cours — touchez pour ouvrir")) return START_NOT_STICKY;
+                handler.removeCallbacks(finishTask);
+                lock();
+                transcribe();
+                return START_NOT_STICKY;
+            }
+            if (!START.equals(action)) {
                 requestStop();
                 return START_NOT_STICKY;
             }
             String l = intent.getStringExtra("lang");
             if (l != null && !l.isEmpty()) lang = l;
-            try {
-                goForeground();
-            } catch (Exception e) {
-                Store.log("premier plan refusé : " + e);
-                Store.fail("service");
-                finish();
+            boolean whisper = intent.getBooleanExtra("whisper", false);
+            if (!foreground(whisper ? "Enregistrement audio en cours — touchez pour ouvrir" : "Transcription en cours — touchez pour ouvrir"))
                 return START_NOT_STICKY;
-            }
             active = true;
             handler.removeCallbacks(finishTask);
-            mute();
             lock();
+            if (whisper) {   // v1.5 — pas de reconnaissance en direct, donc pas de bip à couper
+                startAudio();
+                return START_NOT_STICKY;
+            }
+            mute();
+            // v1.5 — un moteur choisi qui ne rend aucun texte en 30 s est remplacé par Google
+            handler.removeCallbacks(engineCheck);
+            if (!heard && !fallback && !liveEngine(this).isEmpty()) handler.postDelayed(engineCheck, 30000);
             if (!listening) {
                 handler.removeCallbacks(listenTask);
                 handler.post(listenTask);
@@ -451,20 +674,178 @@ public class MainActivity extends Activity {
             return START_NOT_STICKY;
         }
 
-        private void goForeground() {
-            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-            nm.createNotificationChannel(new NotificationChannel(CHANNEL, "Enregistrement en cours", NotificationManager.IMPORTANCE_LOW));
+        private boolean foreground(String text) {
+            try {
+                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                nm.createNotificationChannel(new NotificationChannel(CHANNEL, "Enregistrement en cours", NotificationManager.IMPORTANCE_LOW));
+                if (Build.VERSION.SDK_INT >= 30) startForeground(1, notification(text), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+                else startForeground(1, notification(text));
+                Store.log("premier plan : OK");
+                return true;
+            } catch (Exception e) {
+                Store.log("premier plan refusé : " + e);
+                Store.fail("service");
+                finish();
+                return false;
+            }
+        }
+
+        private Notification notification(String text) {
             PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
-            Notification n = new Notification.Builder(this, CHANNEL)
+            return new Notification.Builder(this, CHANNEL)
                     .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                     .setContentTitle("PLAUD Laurent")
-                    .setContentText("Transcription en cours — touchez pour ouvrir")
+                    .setContentText(text)
                     .setContentIntent(open)
                     .setOngoing(true)
                     .build();
-            if (Build.VERSION.SDK_INT >= 30) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
-            else startForeground(1, n);
-            Store.log("premier plan : OK");
+        }
+
+        private void notifyText(String text) {
+            try {
+                ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).notify(1, notification(text));
+            } catch (Exception e) { /* rien */ }
+        }
+
+        /** v1.5 — Le moteur choisi n'a rien rendu depuis 30 s : on passe sur Google pour ne pas perdre l'entretien. */
+        private void checkEngine() {
+            if (!active || heard || fallback || liveEngine(this).isEmpty()) return;
+            fallback = true;
+            Store.log("le moteur choisi ne rend aucun texte — retour au moteur Google");
+            Store.error("engine");
+            schedule(100, true);
+        }
+
+        /* ---------- v1.5 — Mode Whisper : enregistrement audio puis transcription ---------- */
+
+        private void startAudio() {
+            if (recorder != null) return;   // déjà en cours (page rouverte)
+            try {
+                recorder = new Whisper.Recorder(audio(this));
+                Store.phase("rec", 0);
+                Store.provider("Whisper sur le téléphone (modèle " + Whisper.Models.chosen(this) + ")");
+            } catch (Exception e) {
+                Store.log("enregistrement audio : " + e);
+                Store.fail("audio-capture");
+                finish();
+            }
+        }
+
+        void pauseAudio(boolean on) {
+            if (recorder == null) return;
+            recorder.paused = on;
+            Store.phase(on ? "paused" : "rec", 0);
+        }
+
+        void stopAudio() {
+            active = false;
+            if (recorder == null) {
+                if (transcriber == null) {
+                    Store.close();
+                    finish();
+                }
+                return;
+            }
+            Whisper.Recorder r = recorder;
+            recorder = null;
+            r.finish();
+            Store.log("enregistrement audio arrêté : " + r.samples / Whisper.Recorder.RATE + " s" + (r.error == null ? "" : " — " + r.error));
+            if (r.samples < Whisper.Recorder.RATE) {   // moins d'une seconde : rien à transcrire
+                Store.close();
+                finish();
+                return;
+            }
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(W_PENDING, true).putLong(W_DONE, 0).apply();
+            transcribe();
+        }
+
+        static String clean(String t) {
+            t = t.replace('\n', ' ').trim();
+            if (t.matches("[\\[(][^\\])]*[\\])]")) return "";   // « [Musique] », « (rires) » seuls
+            if (t.length() < 120 && JUNK.matcher(t).find()) return "";
+            return t;
+        }
+
+        private void transcribe() {
+            if (transcriber != null) return;
+            final SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+            final File wav = audio(this);
+            final String model = Whisper.available() ? Whisper.Models.ready(this, Whisper.Models.chosen(this)) : null;
+            if (model == null || wav.length() <= 44) {
+                Store.log("transcription impossible : " + (!Whisper.available() ? Whisper.LOAD_ERROR : model == null ? "modèle absent" : "audio absent"));
+                Store.fail(model == null ? "w-model" : "w-error");
+                finish();
+                return;
+            }
+            String l = p.getString(W_LANG, "fr-FR");
+            final String language = l.length() >= 2 ? l.substring(0, 2) : "fr";
+            final String prompt = p.getString(W_PROMPT, "");
+            final long from = p.getLong(W_DONE, 0), total = Math.max(1, Whisper.durationMs(wav));
+            final String vad = Whisper.vadModel(this);
+            final int threads = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+            shownPct = -1;
+            Store.phase("transcribing", (int) (from * 100 / total));
+            Store.log("transcription Whisper : " + new File(model).getName() + ", " + threads + " threads, de " + from / 1000 + " s à " + total / 1000 + " s");
+            Store.log("processeur : " + Whisper.info());
+            notifyText("Transcription Whisper en cours — touchez pour ouvrir");
+            final long started = System.currentTimeMillis();
+            transcriber = new Thread(() -> {
+                Whisper.Listener listener = new Whisper.Listener() {
+                    long prevEnd = from;
+                    String prev = "";
+                    int repeats;
+
+                    @Override
+                    public void onSegment(byte[] utf8, long t0, long t1) {
+                        String t = clean(new String(utf8, StandardCharsets.UTF_8));
+                        if (!t.isEmpty()) {
+                            if (t.equals(prev)) repeats++;
+                            else { prev = t; repeats = 0; }
+                            // Plus de 4 s de silence avant la phrase : nouveau paragraphe.
+                            if (repeats < 2) Store.add((t0 - prevEnd > 4000 ? Store.PARA : "") + t);
+                        }
+                        prevEnd = t1;
+                        p.edit().putLong(W_DONE, t1).apply();
+                    }
+
+                    @Override
+                    public void onProgress(int pct) {
+                        final int all = (int) Math.min(100, (from + (total - from) * pct / 100) * 100 / total);
+                        Store.phase("transcribing", all);
+                        handler.post(() -> {
+                            if (all / 5 == shownPct / 5) return;
+                            shownPct = all;
+                            notifyText("Transcription Whisper : " + all + " % — touchez pour ouvrir");
+                        });
+                    }
+                };
+                int code = Whisper.run(model, vad, wav.getAbsolutePath(), language, prompt, threads, from, listener);
+                if (code == Whisper.ERR_RUN && vad != null) {   // repli : sans détection de la parole
+                    Store.log("nouvel essai sans détection de la parole");
+                    code = Whisper.run(model, null, wav.getAbsolutePath(), language, prompt, threads, p.getLong(W_DONE, from), listener);
+                }
+                final int rc = code;
+                handler.post(() -> transcribed(rc, System.currentTimeMillis() - started));
+            }, "plaud-whisper");
+            transcriber.start();
+        }
+
+        private void transcribed(int code, long ms) {
+            transcriber = null;
+            if (code == Whisper.OK) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(W_PENDING, false).putLong(W_DONE, 0).apply();
+                Store.log("transcription terminée en " + ms / 1000 + " s");
+                Store.phase("done", 100);
+                Store.close();
+            } else if (code == Whisper.ABORTED) {
+                Store.log("transcription interrompue à la demande");
+                Store.phase("stopped", 0);
+                Store.close();
+            } else {
+                Store.log("transcription : " + Whisper.message(code));
+                Store.fail(code == Whisper.ERR_MODEL ? "w-model" : "w-error");
+            }
+            finish();
         }
 
         /** Coupe les sons multimédia, système et notifications (le bip de la reconnaissance). */
@@ -561,7 +942,7 @@ public class MainActivity extends Activity {
             StringBuilder seen = new StringBuilder();
             for (ResolveInfo r : list) if (r.serviceInfo != null) seen.append(r.serviceInfo.packageName).append(' ');
             Store.log("services disponibles : " + seen);
-            String want = fallback ? "" : chosen(this);
+            String want = fallback ? "" : liveEngine(this);
             ComponentName c = want.isEmpty() ? null : ComponentName.unflattenFromString(want);
             if (c != null) {
                 for (ResolveInfo r : list)
@@ -684,7 +1065,7 @@ public class MainActivity extends Activity {
             errors++;
             // v1.4 — Le moteur choisi échoue 5 fois sans rien rendre : on bascule sur Google
             // pour ne pas perdre l'entretien (la page affiche un avertissement).
-            if (errors >= 5 && !heard && !fallback && !chosen(this).isEmpty()) {
+            if (errors >= 5 && !heard && !fallback && !liveEngine(this).isEmpty()) {
                 fallback = true;
                 recreate = true;
                 Store.log("le moteur choisi ne répond pas — retour au moteur Google");
@@ -716,6 +1097,11 @@ public class MainActivity extends Activity {
             heard = fallback = false;   // v1.4 — le prochain enregistrement réessaie le moteur choisi
             handler.removeCallbacks(listenTask);
             handler.removeCallbacks(finishTask);
+            handler.removeCallbacks(engineCheck);
+            if (recorder != null) {   // v1.5
+                recorder.finish();
+                recorder = null;
+            }
             destroyRecognizer();
             Store.interim("");
             unmute();
@@ -736,6 +1122,8 @@ public class MainActivity extends Activity {
         @Override
         public void onDestroy() {
             handler.removeCallbacksAndMessages(null);
+            if (recorder != null) recorder.finish();          // v1.5
+            if (transcriber != null) Whisper.abort();          // v1.5 — la reprise reste possible
             destroyRecognizer();
             unmute();
             unlock();
@@ -751,7 +1139,11 @@ public class MainActivity extends Activity {
      * recopiée dans un fichier à chaque phrase (protection contre une fermeture brutale).
      */
     static final class Store {
+        static final String PARA = "\u00b6";   // v1.5 — en tête d'une phrase : nouveau paragraphe
         private static File file;
+        private static Context app;
+        private static String mode = "live", phase = "";   // v1.5 — live | whisper ; rec | paused | transcribing | done | stopped
+        private static int pct;
         private static String session = "";
         private static final ArrayList<String> segs = new ArrayList<>();
         private static String interim = "", err = "", fail = "", provider = "pas encore utilisé";
@@ -761,7 +1153,8 @@ public class MainActivity extends Activity {
 
         static synchronized void init(Context c) {
             if (file != null) return;
-            file = new File(c.getApplicationContext().getFilesDir(), "transcription.txt");
+            app = c.getApplicationContext();
+            file = new File(app.getFilesDir(), "transcription.txt");
             if (file.exists()) {
                 try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
                     String line = r.readLine();
@@ -783,6 +1176,9 @@ public class MainActivity extends Activity {
             interim = "";
             if (running) return session;
             running = true;
+            mode = "live";
+            phase = "";
+            pct = 0;
             session = String.valueOf(System.currentTimeMillis());
             segs.clear();
             write(session + "\n", false);
@@ -819,6 +1215,16 @@ public class MainActivity extends Activity {
             write(t + "\n", true);
         }
 
+        static synchronized void mode(String m) {
+            mode = m;
+        }
+
+        static synchronized void phase(String p, int percent) {
+            if (!p.equals(phase)) log("étape : " + p);
+            phase = p;
+            pct = percent;
+        }
+
         static synchronized void interim(String t) {
             interim = t == null ? "" : t;
         }
@@ -844,6 +1250,13 @@ public class MainActivity extends Activity {
                 o.put("err", err);
                 o.put("fail", fail);
                 o.put("running", running);
+                // v1.5 — mode Whisper : étape, avancement, reprise possible, audio disponible
+                o.put("mode", mode);
+                o.put("phase", phase);
+                o.put("pct", pct);
+                boolean audio = app != null && Rec.audio(app).length() > 44;
+                o.put("audio", audio && !running);
+                o.put("resume", audio && !running && app.getSharedPreferences(Rec.PREFS, MODE_PRIVATE).getBoolean(Rec.W_PENDING, false));
                 return o.toString();
             } catch (Exception e) {
                 return "{}";
