@@ -71,6 +71,9 @@ textarea{resize:vertical}
 .help{font-size:13px;color:var(--muted);line-height:1.45}
 .chk{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:15px}
 .chk input{width:22px;height:22px}
+/* v1.5 — avancement de la transcription Whisper */
+.prog{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:12px}
+.prog div{height:100%;width:0;background:var(--teal);transition:width .6s}
 </style>
 </head>
 <body>
@@ -118,6 +121,11 @@ textarea{resize:vertical}
       <button class="big stop" id="bStop" disabled>Arrêter</button>
     </div>
     <div class="interim" id="interim"></div>
+    <!-- v1.5 — mode Whisper : avancement, interruption / reprise, copie de l'audio -->
+    <div class="prog hidden" id="wProg"><div id="wBar"></div></div>
+    <button class="btn danger hidden" id="bWCancel">Interrompre la transcription</button>
+    <button class="btn hidden" id="bWResume">Reprendre la transcription</button>
+    <button class="btn hidden" id="bWAudio">Garder l'audio dans le téléphone</button>
     <button class="btn" id="bBlack" disabled>Écran noir (discret, micro actif)</button>
     <p class="help" id="recHelp" style="text-align:left;margin-bottom:0">Le bip est émis par Android, pas par l'application : avant l'entretien, baissez le volume <b>Multimédia</b> à zéro et passez le téléphone en mode <b>Silencieux</b>. Pour poser le téléphone, utilisez « Écran noir » : un appui sur le bouton de veille coupe la transcription.</p>
   </div>
@@ -188,12 +196,25 @@ textarea{resize:vertical}
     <h2>Moteur de transcription</h2>
     <label for="sEngine">Moteur utilisé</label>
     <select id="sEngine"></select>
-    <p class="help">La liste montre les moteurs de reconnaissance vocale installés sur ce téléphone qui acceptent d'être utilisés par une autre application. Si Voice Inc y figure, choisissez-le puis faites un essai de 30 secondes. S'il ne répond pas, l'application revient d'elle-même au moteur Google pour ne rien perdre.</p>
-    <p class="help">Voice Inc absent de la liste ? Enregistrez dans Voice Inc, puis touchez « Partager » sur sa transcription et choisissez <b>PLAUD Laurent</b> : le texte arrive ici comme un entretien, prêt à être envoyé à Claude.</p>
+    <p class="help" id="engineHelp">« Automatique (Google) » écrit le texte en direct, avec internet. « Whisper sur le téléphone » est plus précis : le son est enregistré pendant l'entretien, puis transcrit sur le téléphone, sans internet, quand vous touchez « Arrêter ». Les autres moteurs de la liste sont ceux installés sur le téléphone ; s'ils restent muets, l'application revient d'elle-même à Google.</p>
+    <!-- v1.5 — Whisper : modèle à télécharger une fois, vocabulaire à reconnaître -->
+    <div id="cWhisper" class="hidden">
+      <label for="sModel">Modèle Whisper</label>
+      <select id="sModel"></select>
+      <p class="help" id="wModelState"></p>
+      <div class="grid2">
+        <button class="btn" id="bWDownload">Télécharger</button>
+        <button class="btn danger" id="bWDelete">Supprimer</button>
+      </div>
+      <label for="sVocab">Mots à bien orthographier (marques, produits, noms propres)</label>
+      <textarea id="sVocab" rows="3"></textarea>
+      <p class="help">Téléchargement unique, en Wi-Fi de préférence. Pendant l'entretien, vous pouvez verrouiller le téléphone. La transcription démarre à l'arrêt ; le temps restant s'affiche. Le modèle Rapide est environ quatre fois plus rapide, mais moins juste. Pour un long entretien, branchez le téléphone.</p>
+    </div>
+    <p class="help">Texte transcrit dans une autre application ? Touchez « Partager » dans cette application et choisissez <b>PLAUD Laurent</b> : le texte arrive ici comme un entretien.</p>
   </div>
   <div class="card">
     <h2>À propos</h2>
-    <p class="help">PLAUD Laurent v1.4 — usage privé. Transcription : reconnaissance vocale intégrée au navigateur (gratuite, connexion internet nécessaire). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
+    <p class="help">PLAUD Laurent v1.5 — usage privé. Transcription : reconnaissance vocale Google (en direct, internet nécessaire) ou Whisper sur le téléphone (gratuit, sans internet, le son ne quitte pas le téléphone). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
   </div>
 </section>
 </main>
@@ -232,7 +253,8 @@ const store = {
 const K_DRAFT='plaud.draft', K_HIST='plaud.history', K_SET='plaud.settings';
 const NATIVE = window.PlaudNative || null;   // v1.3 — présent seulement dans l'application Android (APK)
 
-let settings = Object.assign({prompt: DEFAULT_PROMPT, include: true, lang: 'fr-FR', wake: true, para: true, cont: false}, store.get(K_SET, {}));
+const DEFAULT_VOCAB = 'Hyster, Yale, Haulotte, Robopac, AR Racking, Manorga, Stockman, Fimap, Enersys, chariot élévateur, transpalette, gerbeur, rayonnage, nacelle, filmeuse';   // v1.5 — Whisper
+let settings = Object.assign({prompt: DEFAULT_PROMPT, include: true, lang: 'fr-FR', wake: true, para: true, cont: false, vocab: DEFAULT_VOCAB}, store.get(K_SET, {}));
 
 /* ---------- Raccourcis ---------- */
 const $ = id => document.getElementById(id);
@@ -253,6 +275,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on', x===b));
   ['tRec','tHist','tSet'].forEach(id=>$(id).classList.toggle('hidden', id!==b.dataset.tab));
   if(b.dataset.tab==='tHist') renderHistory();
+  if(b.dataset.tab==='tSet' && window.wRender) wRender();   // v1.5 — état du modèle Whisper
 });
 
 /* ---------- Brouillon en cours (sauvegarde automatique) ---------- */
@@ -449,9 +472,118 @@ function stopRecording(){
   els.bStart.textContent = els.text.value.trim() ? 'Continuer' : 'Démarrer';
   els.bPause.textContent = 'Pause'; $('bBlack').disabled = true; hideBlack();
 }
-els.bStart.onclick = startRecording;
-els.bPause.onclick = pauseRecording;
-els.bStop.onclick = stopRecording;
+/* =====================================================================
+   v1.5 — MODE WHISPER (application Android) : le son est enregistré pendant
+   l'entretien, puis transcrit sur le téléphone à l'arrêt, sans internet.
+   Les phrases arrivent par le même canal que la transcription en direct
+   (NATIVE.poll) ; « ¶ » en tête d'une phrase annonce un nouveau paragraphe.
+   ===================================================================== */
+let engine = '';   // moteur choisi dans les Réglages : '' (Google), 'whisper' ou un autre service
+const W = {
+  cur: false,       // l'enregistrement ou la transcription en cours est en mode Whisper
+  timer: null, first: false, t0: 0, p0: 0,
+  on(){ return !!NATIVE && engine === 'whisper'; },
+  // Liste simple : une phrase d'introduction (« Vocabulaire : ») finit parfois recopiée dans le texte.
+  vocab(){ const v = (settings.vocab||'').replace(/\s+/g,' ').trim().replace(/[.,;\s]+$/,'').slice(0,400); return v ? v+'.' : ''; },
+  start(){
+    if(state !== 'idle') return;
+    let r; try{ r = JSON.parse(NATIVE.wstart(settings.lang, this.vocab())); }catch(_){ r = {ok:false, error:'service'}; }
+    if(!r.ok){ this.refused(r.error); return; }
+    if(r.session !== nSess){ nSess = r.session; nIdx = 0; saveDraft(); }
+    this.cur = true; this.first = true; state = 'live'; startTimer(); this.ui(); this.poll();
+  },
+  resume(){
+    let r; try{ r = JSON.parse(NATIVE.wresume()); }catch(_){ r = {ok:false, error:'service'}; }
+    if(!r.ok){ this.refused(r.error); return; }
+    nSess = r.session; nIdx = 0; saveDraft();
+    this.cur = true; this.first = false; state = 'transcribing'; this.t0 = 0; this.ui(0); this.poll();
+  },
+  restore(p){   // page rouverte pendant un enregistrement ou une transcription
+    this.cur = true;
+    state = p.phase==='transcribing' ? 'transcribing' : p.phase==='paused' ? 'paused' : 'live';
+    if(state==='live') startTimer();
+    this.ui(p.pct); this.poll();
+  },
+  refused(e){
+    setStatus({'not-allowed':'Micro refusé : autorisez le micro pour PLAUD Laurent dans les réglages du téléphone.',
+      'w-model':'Modèle Whisper non téléchargé : Réglages → Moteur de transcription → Télécharger.',
+      'space':'Mémoire du téléphone presque pleine : libérez de la place avant d’enregistrer.',
+      'busy':'Une transcription est déjà en cours : attendez la fin.'}[e] || 'Démarrage impossible : copiez le journal technique (Réglages) et envoyez-le à Claude.', 'warn');
+  },
+  pause(){
+    if(state==='live'){ NATIVE.wpause(true); state='paused'; stopTimer(); }
+    else if(state==='paused'){ NATIVE.wpause(false); state='live'; startTimer(); }
+    this.ui();
+  },
+  stop(){
+    if(state!=='live' && state!=='paused') return;
+    if(timer) stopTimer();
+    state = 'transcribing'; this.t0 = 0; NATIVE.wstop(); this.ui(0);
+  },
+  ui(pct){
+    const rec = state==='live' || state==='paused', tr = state==='transcribing';
+    els.bStart.disabled = true; els.bPause.disabled = !rec; els.bStop.disabled = !rec;
+    els.bPause.textContent = state==='paused' ? 'Reprendre' : 'Pause';
+    $('wProg').classList.toggle('hidden', !tr); $('bWCancel').classList.toggle('hidden', !tr);
+    $('bWResume').classList.add('hidden'); $('bWAudio').classList.add('hidden');
+    if(state==='live') setStatus('<span class="dot"></span>Enregistrement audio — le texte sera écrit à l’arrêt','live');
+    else if(state==='paused') setStatus('En pause','warn');
+    else if(tr){
+      pct = pct || 0; $('wBar').style.width = pct+'%';
+      const now = Date.now(); let eta = '';
+      if(!this.t0 || pct < this.p0){ this.t0 = now; this.p0 = pct; }
+      else if(pct - this.p0 >= 2){ const m = Math.ceil((now-this.t0)/(pct-this.p0)*(100-pct)/60000); eta = ' — environ '+m+' min'; }
+      setStatus('Transcription Whisper : '+pct+' %'+eta+'. Vous pouvez verrouiller le téléphone.');
+    }
+  },
+  poll(){ clearInterval(this.timer); this.timer = setInterval(()=>this.tick(), 1000); this.tick(); },
+  tick(){
+    let p; try{ p = JSON.parse(NATIVE.poll(nSess, nIdx)); }catch(_){ return; }
+    if(p.session === nSess) (p.segs||[]).forEach(t=>{ nIdx++; this.add(t); });
+    if(p.running){
+      if(p.phase==='transcribing'){ if(state!=='transcribing'){ if(timer) stopTimer(); state='transcribing'; } this.ui(p.pct); }
+      return;
+    }
+    clearInterval(this.timer); this.timer = null;
+    this.end(p);
+  },
+  add(t){
+    const para = t.charAt(0) === '¶'; t = (para ? t.slice(1) : t).trim(); if(!t) return;
+    const cur = els.text.value;
+    let sep = '';
+    if(cur.length) sep = ((this.first || para) && settings.para) ? '\n\n' : (/\s$/.test(cur) ? '' : ' ');
+    this.first = false;
+    els.text.value = cur.replace(/[ \t]+$/, '') + sep + t;
+    els.text.scrollTop = els.text.scrollHeight;
+    saveDraft();
+  },
+  end(p){
+    this.cur = false; state = 'idle'; if(timer) stopTimer();
+    const has = !!els.text.value.trim();
+    els.bStart.disabled = false; els.bPause.disabled = true; els.bStop.disabled = true;
+    els.bStart.textContent = has ? 'Continuer' : 'Démarrer'; els.bPause.textContent = 'Pause';
+    if(p.fail==='w-model') setStatus('Modèle Whisper introuvable : Réglages → Moteur de transcription → Télécharger.','warn');
+    else if(p.fail==='audio-capture') setStatus('Micro indisponible (utilisé par une autre application ?)','warn');
+    else if(p.fail) setStatus('La transcription s’est interrompue : touchez « Reprendre la transcription ». Si cela se répète, copiez le journal technique (Réglages).','warn');
+    else if(p.phase==='stopped') setStatus('Transcription interrompue : touchez « Reprendre la transcription » pour la terminer.','warn');
+    else setStatus(has ? 'Transcription terminée — envoyez le texte à Claude' : 'Aucune parole reconnue dans l’enregistrement','');
+    this.extra(p);
+  },
+  extra(p){
+    $('wProg').classList.add('hidden'); $('bWCancel').classList.add('hidden');
+    $('bWResume').classList.toggle('hidden', !p.resume); $('bWAudio').classList.toggle('hidden', !(p.audio && this.on()));
+  }
+};
+$('bWCancel').onclick = ()=>{ NATIVE.wcancel(); setStatus('Interruption de la transcription…'); };
+$('bWResume').onclick = ()=>{ if(state==='idle') W.resume(); };
+$('bWAudio').onclick = ()=>{
+  const s = (els.company.value||els.contact.value||'entretien').replace(/[^\w\-À-ÿ]+/g,'_').slice(0,40);
+  toast(NATIVE.saveAudio('PLAUD_'+(els.date.value||today())+'_'+s+'.wav'));
+};
+
+els.bStart.onclick = ()=>{ if(W.on()) W.start(); else startRecording(); };
+els.bPause.onclick = ()=>{ if(W.cur) W.pause(); else pauseRecording(); };
+els.bStop.onclick = ()=>{ if(W.cur) W.stop(); else stopRecording(); };
 
 /* =====================================================================
    MESSAGE POUR CLAUDE
@@ -507,6 +639,7 @@ $('bCopy').onclick  = async ()=>{ if(!hasText()) return; autoArchive(); toast(aw
 $('bDownload').onclick = ()=>{ if(!hasText()) return; downloadText(buildMessage(), fileName(currentEntry())); };
 $('bSave').onclick = ()=>{ if(!hasText()) return; autoArchive(); toast('Entretien archivé'); };
 $('bNew').onclick = ()=>{
+  if(W.cur){ toast('Arrêtez l’enregistrement et attendez la fin de la transcription.'); return; }   // v1.5
   if(state!=='idle') stopRecording();
   if(els.text.value.trim() && !confirmNew()) return;
   if(els.text.value.trim()) autoArchive();
@@ -547,6 +680,7 @@ function renderHistory(){
 }
 $('hSearch').addEventListener('input', renderHistory);
 function openEntry(h){
+  if(W.cur){ toast('Arrêtez l’enregistrement et attendez la fin de la transcription.'); return; }   // v1.5
   if(state!=='idle') stopRecording();
   loadDraft(Object.assign({}, h, {currentId:h.id})); saveDraft();
   els.bStart.textContent='Continuer'; setStatus('Entretien rouvert');
@@ -611,17 +745,63 @@ if(NATIVE){
   const bLog = document.createElement('button'); bLog.className = 'btn'; bLog.textContent = 'Copier le journal technique';
   bLog.onclick = ()=>{ NATIVE.copy(NATIVE.log()); toast('Journal copié : collez-le dans Claude en cas de souci'); };
   $('tSet').lastElementChild.appendChild(bLog);
-  /* v1.4 — Choix du moteur de reconnaissance vocale */
+  /* v1.4 — Choix du moteur de reconnaissance vocale ; v1.5 — Whisper sur le téléphone */
+  const LIVE_HELP = $('recHelp').textContent;
+  const WHISPER_HELP = "Mode Whisper : le son est enregistré pendant l'entretien (vous pouvez verrouiller le téléphone), puis transcrit sur le téléphone, sans internet, quand vous touchez « Arrêter ».";
+  const recHelp = ()=>{ $('recHelp').textContent = W.on() ? WHISPER_HELP : LIVE_HELP; };
+  let wm = {}; try{ wm = JSON.parse(NATIVE.models()); }catch(_){}
   try{
     const en = JSON.parse(NATIVE.engines()), sel = $('sEngine');
     const add = (v, t)=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); };
-    add('', 'Automatique (Google)');
+    add('', 'Automatique (Google, en direct)');
+    if(wm.lib) add('whisper', 'Whisper sur le téléphone (précis)');
     en.list.filter(m=>!/^com\.google\./.test(m.pkg)).forEach(m=>add(m.id, m.label));
     en.list.filter(m=>/^com\.google\./.test(m.pkg)).forEach(m=>add(m.id, m.label));
-    sel.value = en.list.some(m=>m.id===en.chosen) ? en.chosen : '';
-    sel.onchange = e=>{ NATIVE.setEngine(e.target.value); toast('Pris en compte au prochain démarrage'); };
+    engine = (en.chosen==='whisper' && wm.lib) || en.list.some(m=>m.id===en.chosen) ? en.chosen : '';
+    sel.value = engine;
+    sel.onchange = e=>{
+      if(state!=='idle'){ sel.value = engine; toast('Arrêtez d’abord l’enregistrement en cours'); return; }
+      engine = e.target.value; NATIVE.setEngine(engine); recHelp();
+      $('cWhisper').classList.toggle('hidden', !W.on());
+      if(W.on()){ wRender(); $('bWAudio').classList.add('hidden'); }
+      toast(W.on() ? 'Whisper choisi : vérifiez que le modèle est téléchargé' : 'Pris en compte au prochain démarrage');
+    };
     $('cEngine').classList.remove('hidden');
   }catch(_){}
+  /* v1.5 — Modèle Whisper : choix, téléchargement, suppression ; vocabulaire */
+  let wTimer = null, wDelArmed = 0;
+  window.wRender = ()=>{
+    if(!W.on()) return;
+    let m; try{ m = JSON.parse(NATIVE.models()); }catch(_){ return; }
+    const sel = $('sModel');
+    if(!sel.options.length) (m.list||[]).filter(x=>x.id!=='essai').forEach(x=>{ const o=document.createElement('option'); o.value=x.id; o.textContent=x.label; sel.appendChild(o); });
+    sel.value = m.chosen;
+    const cur = (m.list||[]).find(x=>x.id===m.chosen) || {};
+    const go = String(Math.round((m.free||0)/1e8)/10).replace('.', ',');
+    $('wModelState').textContent = !m.lib ? 'Whisper ne peut pas fonctionner sur ce téléphone : '+(m.libError||'bibliothèque absente')
+      : cur.state==='ready' ? '✓ Modèle prêt : la transcription fonctionne sans internet.'
+      : cur.state==='downloading' ? 'Téléchargement : '+cur.pct+' %'+(cur.note ? ' — '+cur.note : '')+'. Vous pouvez quitter cet écran.'
+      : (cur.note ? cur.note+'. ' : '')+'Modèle à télécharger une seule fois. Espace libre : '+go+' Go.';
+    const b = $('bWDownload');
+    b.textContent = cur.state==='downloading' ? 'Annuler le téléchargement' : 'Télécharger';
+    b.disabled = !m.lib || cur.state==='ready';
+    $('bWDelete').disabled = cur.state!=='ready'; $('bWDelete').textContent = 'Supprimer';
+    clearTimeout(wTimer); if(cur.state==='downloading') wTimer = setTimeout(wRender, 1500);
+  };
+  $('sModel').onchange = e=>{ NATIVE.setModel(e.target.value); wRender(); };
+  $('bWDownload').onclick = ()=>{
+    const id = $('sModel').value;
+    if($('bWDownload').textContent.startsWith('Annuler')) NATIVE.cancelDownload(id); else NATIVE.download(id);
+    setTimeout(wRender, 600);
+  };
+  $('bWDelete').onclick = ()=>{
+    if(Date.now()-wDelArmed > 3000){ wDelArmed = Date.now(); $('bWDelete').textContent = 'Confirmer ?'; return; }
+    wDelArmed = 0; NATIVE.deleteModel($('sModel').value); wRender(); toast('Modèle supprimé');
+  };
+  $('sVocab').value = settings.vocab;
+  $('sVocab').addEventListener('input', e=>{ settings.vocab = e.target.value; saveSettings(); });
+  $('cWhisper').classList.toggle('hidden', !W.on());
+  recHelp();
   /* v1.4 — Texte reçu par « Partager » depuis une autre application (ex. Voice Inc) */
   window.plaudShared = ()=>{
     let t = ''; try{ t = NATIVE.takeShared(); }catch(_){}
@@ -639,10 +819,15 @@ if(NATIVE){
   };
   try{
     const p = JSON.parse(NATIVE.poll(nSess, nIdx));
-    if(p.running){ startRecording(); }
-    else if(nSess && p.session === nSess && p.segs && p.segs.length){
-      p.segs.forEach(t=>{ nIdx++; appendFinal(t); });
-      els.bStart.textContent = 'Continuer'; setStatus("Transcription récupérée après fermeture de l'application",'warn');
+    if(p.running && p.mode==='whisper'){ W.restore(p); }   // v1.5
+    else if(p.running){ startRecording(); }
+    else {
+      if(nSess && p.session === nSess && p.segs && p.segs.length){
+        p.segs.forEach(t=>{ nIdx++; if(t.charAt(0)==='¶' || p.mode==='whisper') W.add(t); else appendFinal(t); });
+        els.bStart.textContent = 'Continuer'; setStatus("Transcription récupérée après fermeture de l'application",'warn');
+      }
+      W.extra(p);   // v1.5 — transcription à reprendre, audio à garder
+      if(p.resume) setStatus('Transcription interrompue : touchez « Reprendre la transcription » pour la terminer.','warn');
     }
   }catch(_){}
   plaudShared();   // v1.4 — application ouverte par « Partager »
