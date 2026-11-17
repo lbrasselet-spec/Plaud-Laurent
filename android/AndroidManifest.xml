@@ -46,5 +46,13 @@
             android:name=".MainActivity$Rec"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- v1.6 : partage des longs entretiens en fichier joint (accès temporaire,
+             en lecture seule, au seul fichier partagé). -->
+        <provider
+            android:name=".ShareProvider"
+            android:authorities="fr.brasselet.plaud.partage"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

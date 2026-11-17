@@ -344,6 +344,33 @@ public class MainActivity extends Activity {
             });
         }
 
+        /** v1.6 — Longs entretiens : le texte part en fichier joint, le transfert est instantané. */
+        @JavascriptInterface
+        public String shareFile(String title, String name, String content) {
+            try {
+                File d = ShareProvider.dir(MainActivity.this);
+                File[] old = d.listFiles();
+                if (old != null) for (File o : old) o.delete();   // un seul fichier partagé à la fois
+                File f = new File(d, name.replaceAll("[/\\\\]+", "_"));
+                try (FileOutputStream o = new FileOutputStream(f)) {
+                    o.write(content.getBytes(StandardCharsets.UTF_8));
+                }
+                Uri uri = Uri.parse("content://" + ShareProvider.AUTHORITY + "/" + Uri.encode(f.getName()));
+                final Intent s = new Intent(Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(Intent.EXTRA_SUBJECT, title)
+                        .putExtra(Intent.EXTRA_STREAM, uri)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                runOnUiThread(() -> {
+                    try { startActivity(Intent.createChooser(s, "Envoyer à Claude")); }
+                    catch (Exception e) { Store.log("partage fichier : " + e); }
+                });
+                return "{\"ok\":true}";
+            } catch (Exception e) {
+                Store.log("partage fichier : " + e);
+                return "{\"ok\":false}";
+            }
+        }
+
         @JavascriptInterface
         public void copy(String text) {
             runOnUiThread(() -> {
@@ -782,10 +809,14 @@ public class MainActivity extends Activity {
             final String prompt = p.getString(W_PROMPT, "");
             final long from = p.getLong(W_DONE, 0), total = Math.max(1, Whisper.durationMs(wav));
             final String vad = Whisper.vadModel(this);
-            final int threads = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+            // v1.6 — mode longue réunion : au-delà de 30 minutes d'audio, 4 cœurs au lieu de 8.
+            // À peine plus lent, mais le téléphone chauffe beaucoup moins sur les transcriptions longues.
+            final boolean longue = total > 30 * 60_000L;
+            final int threads = Math.max(2, Math.min(longue ? 4 : 8, Runtime.getRuntime().availableProcessors()));
             shownPct = -1;
             Store.phase("transcribing", (int) (from * 100 / total));
-            Store.log("transcription Whisper : " + new File(model).getName() + ", " + threads + " threads, de " + from / 1000 + " s à " + total / 1000 + " s");
+            Store.log("transcription Whisper : " + new File(model).getName() + ", " + threads + " threads"
+                    + (longue ? " (longue réunion : chauffe réduite)" : "") + ", de " + from / 1000 + " s à " + total / 1000 + " s");
             Store.log("processeur : " + Whisper.info());
             notifyText("Transcription Whisper en cours — touchez pour ouvrir");
             final long started = System.currentTimeMillis();
