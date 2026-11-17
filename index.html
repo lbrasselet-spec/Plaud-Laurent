@@ -145,7 +145,7 @@ textarea{resize:vertical}
       <button class="btn" id="bDownload">Télécharger .txt</button>
       <button class="btn danger" id="bNew">Nouvel entretien</button>
     </div>
-    <p class="help">« Envoyer à Claude » ouvre le menu de partage du téléphone : choisissez l'application Claude. Si elle n'apparaît pas, utilisez « Copier pour Claude » puis collez le texte dans votre Projet PLAUD LAURENT.</p>
+    <p class="help">« Envoyer à Claude » ouvre le menu de partage du téléphone : choisissez l'application Claude. Au-delà d'environ 1 500 mots, l'entretien part en fichier .txt joint : le transfert est instantané, Claude lit le fichier. Si Claude n'apparaît pas dans le menu, utilisez « Copier pour Claude » puis collez le texte dans votre Projet PLAUD LAURENT.</p>
   </div>
 </section>
 
@@ -208,13 +208,13 @@ textarea{resize:vertical}
       </div>
       <label for="sVocab">Mots à bien orthographier (marques, produits, noms propres)</label>
       <textarea id="sVocab" rows="3"></textarea>
-      <p class="help">Téléchargement unique, en Wi-Fi de préférence. Pendant l'entretien, vous pouvez verrouiller le téléphone. La transcription démarre à l'arrêt ; le temps restant s'affiche. Le modèle Rapide est environ quatre fois plus rapide, mais moins juste. Pour un long entretien, branchez le téléphone.</p>
+      <p class="help">Téléchargement unique, en Wi-Fi de préférence. Pendant l'entretien, vous pouvez verrouiller le téléphone. La transcription démarre à l'arrêt ; le temps restant s'affiche. Le modèle Rapide est environ quatre fois plus rapide, mais moins juste. Pour un long entretien, branchez le téléphone : au-delà de 30 minutes d'audio, la transcription passe d'elle-même en « chauffe réduite » (un peu plus lente, téléphone bien moins chaud).</p>
     </div>
     <p class="help">Texte transcrit dans une autre application ? Touchez « Partager » dans cette application et choisissez <b>PLAUD Laurent</b> : le texte arrive ici comme un entretien.</p>
   </div>
   <div class="card">
     <h2>À propos</h2>
-    <p class="help">PLAUD Laurent v1.5 — usage privé. Transcription : reconnaissance vocale Google (en direct, internet nécessaire) ou Whisper sur le téléphone (gratuit, sans internet, le son ne quitte pas le téléphone). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
+    <p class="help">PLAUD Laurent v1.6 — usage privé. Transcription : reconnaissance vocale Google (en direct, internet nécessaire) ou Whisper sur le téléphone (gratuit, sans internet, le son ne quitte pas le téléphone). Compte-rendu : votre abonnement Claude. Aucune clé API, aucun compte supplémentaire.</p>
   </div>
 </section>
 </main>
@@ -519,6 +519,8 @@ const W = {
     if(state!=='live' && state!=='paused') return;
     if(timer) stopTimer();
     state = 'transcribing'; this.t0 = 0; NATIVE.wstop(); this.ui(0);
+    // v1.6 — longue réunion : la transcription passe en chauffe réduite (4 cœurs).
+    if(elapsed > 1800) toast('Longue réunion : transcription en chauffe réduite. Branchez le téléphone si possible.');
   },
   ui(pct){
     const rec = state==='live' || state==='paused', tr = state==='transcribing';
@@ -590,6 +592,10 @@ els.bStop.onclick = ()=>{ if(W.cur) W.stop(); else stopRecording(); };
    ===================================================================== */
 function buildMessage(entry){
   const e = entry || currentEntry();
+  // v1.6 — très long entretien : compte-rendu plafonné pour que l'écriture dans Claude reste courte.
+  const n = (e.text.trim().match(/\S+/g)||[]).length;
+  const cap = n > 6000 ?
+`CONSIGNE DE LONGUEUR — entretien très long (${n} mots de transcription) : rédige un compte-rendu CONCIS, deux pages au maximum. Synthèse exécutive, informations clés et solutions en quelques puces essentielles chacune ; plan d'action et points de vigilance en listes courtes. Ne recopie jamais la transcription et ne cite que l'indispensable.` : '';
   const head =
 `INFORMATIONS SUR L'ENTRETIEN
 - Date : ${frDate(e.date)}
@@ -602,7 +608,8 @@ TRANSCRIPTION BRUTE :
 """
 ${e.text.trim()}
 """`;
-  return settings.include ? settings.prompt.trim() + '\n\n' + head : 'Rédige le compte-rendu de cet entretien.\n\n' + head;
+  const base = settings.include ? settings.prompt.trim() : 'Rédige le compte-rendu de cet entretien.';
+  return base + (cap ? '\n\n' + cap : '') + '\n\n' + head;
 }
 function currentEntry(){
   return {contact:els.contact.value.trim(), company:els.company.value.trim(), type:els.type.value,
@@ -617,8 +624,14 @@ async function copyText(t){
     const ta=document.createElement('textarea'); ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';
     document.body.appendChild(ta); ta.select(); let ok=false; try{ ok=document.execCommand('copy'); }catch(__){} ta.remove(); return ok; }
 }
-async function shareText(t, title){
+async function shareText(t, title, name){
   if(NATIVE){ NATIVE.share(title||'Entretien', t); return; }   // v1.3 — menu de partage Android
+  if(name && navigator.canShare){   // v1.6 — navigateur : long entretien en fichier joint
+    try{
+      const file = new File([t], name, {type:'text/plain'});
+      if(navigator.canShare({files:[file]})){ await navigator.share({title, files:[file]}); return; }
+    }catch(e){ if(e && e.name==='AbortError') return; }
+  }
   if(navigator.share){
     try{ await navigator.share({title, text:t}); return; }
     catch(e){ if(e && e.name==='AbortError') return; }
@@ -634,7 +647,18 @@ function downloadText(t, name){
 }
 function fileName(e){ const s=(e.company||e.contact||'entretien').replace(/[^\w\-À-ÿ]+/g,'_').slice(0,40); return 'CR_'+(e.date||today())+'_'+s+'.txt'; }
 
-$('bShare').onclick = ()=>{ if(!hasText()) return; autoArchive(); shareText(buildMessage(), 'Entretien '+(els.company.value||'')); };
+/* v1.6 — Au-delà d'environ 1 500 mots, l'entretien part en FICHIER JOINT : le transfert vers
+   Claude est instantané, au lieu d'un énorme texte lent à afficher sur le téléphone. */
+const SHARE_FILE_WORDS = 1500;
+$('bShare').onclick = ()=>{ if(!hasText()) return; autoArchive();
+  const e = currentEntry(), msg = buildMessage(e), title = 'Entretien '+(els.company.value||'');
+  const long = (e.text.trim().match(/\S+/g)||[]).length > SHARE_FILE_WORDS;
+  if(long && NATIVE && NATIVE.shareFile){
+    let r; try{ r = JSON.parse(NATIVE.shareFile(title, fileName(e), msg)); }catch(_){ r = {ok:false}; }
+    if(r.ok){ toast('Entretien joint en fichier .txt : choisissez Claude.'); return; }
+  }
+  shareText(msg, title, long ? fileName(e) : undefined);
+};
 $('bCopy').onclick  = async ()=>{ if(!hasText()) return; autoArchive(); toast(await copyText(buildMessage()) ? 'Copié : collez dans Claude' : 'Copie impossible'); };
 $('bDownload').onclick = ()=>{ if(!hasText()) return; downloadText(buildMessage(), fileName(currentEntry())); };
 $('bSave').onclick = ()=>{ if(!hasText()) return; autoArchive(); toast('Entretien archivé'); };
